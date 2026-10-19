@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+/* Chitthi palette: ink on paper, with a postage-stamp red accent. */
+@theme {
+  --color-paper: #f6f1e7;
+  --color-paper-deep: #ece4d4;
+  --color-ink: #1f2a44;
+  --color-ink-soft: #4a5672;
+  --color-stamp: #c2412d;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+html {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-paper text-ink antialiased;
+}
