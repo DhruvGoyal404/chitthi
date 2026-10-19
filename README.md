@@ -1,0 +1,33 @@
+# Chitthi
+
+A real-time chat app: 1:1 and group conversations, durable ordered history, read receipts, presence and typing indicators.
+
+> **Status: early rewrite (Phase 1, foundations).** Nothing user-facing works yet beyond a health check and a development sign-in shortcut.
+
+**Not end-to-end encrypted.** Messages are stored in plaintext on the server, which can read them. There are no voice or video calls.
+
+## Stack
+
+Node 22 · TypeScript · Express 5 · PostgreSQL 18 · Socket.IO · React 19 · Vite · Tailwind CSS v4 · TanStack Query
+
+## Running locally
+
+Requirements: Node 22.12 or later, and Docker.
+
+```sh
+cp .env.example .env        # then set POSTGRES_PASSWORD (and the matching password in DATABASE_URL)
+npm ci
+docker compose up -d db     # Postgres on 127.0.0.1:5435
+npm run db:migrate
+npm run dev:api             # http://127.0.0.1:8082/api/health
+npm run dev:web             # http://localhost:5175
+```
+
+## Docs
+
+- [docs/AUDIT.md](docs/AUDIT.md): audit of the legacy codebase and the plan for this rewrite.
+- [CLAUDE.md](CLAUDE.md): invariants, phases and working rules.
+
+## Licence
+
+MIT
