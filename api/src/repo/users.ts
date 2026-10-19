@@ -49,3 +49,11 @@ export function mapUserError(err: unknown): unknown {
   if (violates(err, 'users_handle_format')) return new HttpError(400, 'invalid_handle', 'Handles are 3–20 characters: letters, digits or _');
   return err;
 }
+
+/** Exact, case-insensitive handle lookup of an active user. */
+export async function findUserByHandle(pool: pg.Pool, handle: string): Promise<User | undefined> {
+  const { rows: [user] } = await pool.query<User>(
+    `SELECT ${USER_COLUMNS} FROM users u WHERE lower(u.handle) = lower($1) AND u.disabled_at IS NULL`, [handle],
+  );
+  return user;
+}

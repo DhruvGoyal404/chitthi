@@ -10,10 +10,13 @@ export type Limit = { points: number; duration: number };
 export type Limits = {
   /** Per client IP, across sign-in endpoints (the dev sign-in now, OAuth later). */
   auth: Limit;
+  /** Per user, across message sends, edits and deletes. */
+  send: Limit;
 };
 
 export const DEFAULT_LIMITS: Limits = {
   auth: { points: 30, duration: 10 * 60 },
+  send: { points: 120, duration: 60 },
 };
 
 export type RateLimit = (key: string) => Promise<void>;
@@ -50,7 +53,7 @@ export function createRateLimits(pool: pg.Pool, logger: Logger, limits: Limits =
       }
     };
   };
-  return { auth: make('auth') };
+  return { auth: make('auth'), send: make('send') };
 }
 
 /** Express middleware: limit by a key derived from the request (429 with Retry-After when exceeded). */

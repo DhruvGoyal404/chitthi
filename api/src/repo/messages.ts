@@ -107,10 +107,10 @@ export async function sendMessage(pool: pg.Pool, input: SendInput): Promise<Send
 }
 
 /** Explains why an edit/delete matched no row, in the order a client can act on. */
-async function explainMiss(pool: pg.Pool, messageId: string, userId: string): Promise<never> {
+async function explainMiss(pool: pg.Pool, conversationId: string, messageId: string, userId: string): Promise<never> {
   const { rows: [m] } = await pool.query<{ conversation_id: string; sender_id: string | null; kind: string; deleted_at: Date | null; visible: boolean }>(
-    `SELECT m.conversation_id, m.sender_id, m.kind, m.deleted_at, ${visibleTo('$2')} AS visible FROM messages m WHERE m.id = $1`,
-    [messageId, userId],
+    `SELECT m.conversation_id, m.sender_id, m.kind, m.deleted_at, ${visibleTo('$2')} AS visible FROM messages m WHERE m.id = $1 AND m.conversation_id = $3`,
+    [messageId, userId, conversationId],
   );
   if (!m?.visible) throw new HttpError(404, 'not_found', 'Message not found');
   if (m.sender_id !== userId || m.kind !== 'text') throw new HttpError(403, 'forbidden', 'You can only change your own messages');
@@ -119,18 +119,19 @@ async function explainMiss(pool: pg.Pool, messageId: string, userId: string): Pr
 }
 
 /** Sender-only edit of a live text message, while an active member. Takes a new change cursor value. */
-export async function editMessage(pool: pg.Pool, input: { messageId: string; userId: string; body: string }): Promise<Message> {
+export async function editMessage(pool: pg.Pool, input: { conversationId: string; messageId: string; userId: string; body: string }): Promise<Message> {
+  assertUuid(input.conversationId, 'Conversation');
   assertUuid(input.messageId, 'Message');
   const body = validateBody(input.body);
   const { rows: [row] } = await pool.query<Message>(
     `UPDATE messages m SET body = $3
-      WHERE m.id = $1 AND m.sender_id = $2 AND m.kind = 'text' AND m.deleted_at IS NULL
+      WHERE m.id = $1 AND m.sender_id = $2 AND m.conversation_id = $4 AND m.kind = 'text' AND m.deleted_at IS NULL
         AND EXISTS (SELECT 1 FROM conversation_memberships p
                      WHERE p.conversation_id = m.conversation_id AND p.user_id = $2 AND p.left_at IS NULL)
       RETURNING ${MSG_COLUMNS}`,
-    [input.messageId, input.userId, body],
+    [input.messageId, input.userId, body, input.conversationId],
   );
-  return row ?? explainMiss(pool, input.messageId, input.userId);
+  return row ?? explainMiss(pool, input.conversationId, input.messageId, input.userId);
 }
 
 /**
@@ -138,20 +139,21 @@ export async function editMessage(pool: pg.Pool, input: { messageId: string; use
  * sender may do it, and still may after leaving (erasing your own words is never blocked).
  * Idempotent: deleting a tombstone returns it.
  */
-export async function deleteForEveryone(pool: pg.Pool, input: { messageId: string; userId: string }): Promise<Message> {
+export async function deleteForEveryone(pool: pg.Pool, input: { conversationId: string; messageId: string; userId: string }): Promise<Message> {
+  assertUuid(input.conversationId, 'Conversation');
   assertUuid(input.messageId, 'Message');
   const { rows: [row] } = await pool.query<Message>(
     `UPDATE messages m SET deleted_at = now()
-      WHERE m.id = $1 AND m.sender_id = $2 AND m.kind = 'text' AND m.deleted_at IS NULL
+      WHERE m.id = $1 AND m.sender_id = $2 AND m.conversation_id = $3 AND m.kind = 'text' AND m.deleted_at IS NULL
       RETURNING ${MSG_COLUMNS}`,
-    [input.messageId, input.userId],
+    [input.messageId, input.userId, input.conversationId],
   );
   if (row) return row;
   const { rows: [tombstone] } = await pool.query<Message>(
-    `SELECT ${MSG_COLUMNS} FROM messages m WHERE m.id = $1 AND m.sender_id = $2 AND m.deleted_at IS NOT NULL`,
-    [input.messageId, input.userId],
+    `SELECT ${MSG_COLUMNS} FROM messages m WHERE m.id = $1 AND m.sender_id = $2 AND m.conversation_id = $3 AND m.deleted_at IS NOT NULL`,
+    [input.messageId, input.userId, input.conversationId],
   );
-  return tombstone ?? explainMiss(pool, input.messageId, input.userId);
+  return tombstone ?? explainMiss(pool, input.conversationId, input.messageId, input.userId);
 }
 
 export type Markers = { lastReadSeq: number; lastDeliveredSeq: number };

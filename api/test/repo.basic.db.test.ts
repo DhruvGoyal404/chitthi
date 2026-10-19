@@ -92,15 +92,15 @@ describe.skipIf(!url)('repository layer (as chitthi_app)', () => {
       expect([m1.seq, m2.seq]).toEqual([1, 2]);
       expect([m1.changeSeq, m2.changeSeq]).toEqual([1, 2]);
 
-      const edited = await editMessage(pool, { messageId: m1.id, userId: a.id, body: 'first (edited)' });
+      const edited = await editMessage(pool, { conversationId: m1.conversationId, messageId: m1.id, userId: a.id, body: 'first (edited)' });
       expect(edited).toMatchObject({ seq: 1, changeSeq: 3, body: 'first (edited)' });
       expect(edited.editedAt).toBeInstanceOf(Date);
-      await rejectsWith(editMessage(pool, { messageId: m1.id, userId: b.id, body: 'hijack' }), 403, 'forbidden');
+      await rejectsWith(editMessage(pool, { conversationId: m1.conversationId, messageId: m1.id, userId: b.id, body: 'hijack' }), 403, 'forbidden');
 
-      const gone = await deleteForEveryone(pool, { messageId: m2.id, userId: b.id });
+      const gone = await deleteForEveryone(pool, { conversationId: m2.conversationId, messageId: m2.id, userId: b.id });
       expect(gone).toMatchObject({ seq: 2, changeSeq: 4, body: null });
-      expect(await deleteForEveryone(pool, { messageId: m2.id, userId: b.id })).toEqual(gone); // idempotent
-      await rejectsWith(editMessage(pool, { messageId: m2.id, userId: b.id, body: 'resurrect' }), 409, 'message_deleted');
+      expect(await deleteForEveryone(pool, { conversationId: m2.conversationId, messageId: m2.id, userId: b.id })).toEqual(gone); // idempotent
+      await rejectsWith(editMessage(pool, { conversationId: m2.conversationId, messageId: m2.id, userId: b.id, body: 'resurrect' }), 409, 'message_deleted');
 
       const changes = await catchUpByChange(pool, { conversationId: c.id, userId: a.id, afterChange: 2 });
       expect(changes.messages.map((m) => [m.seq, m.changeSeq])).toEqual([[1, 3], [2, 4]]);
@@ -149,7 +149,7 @@ describe.skipIf(!url)('repository layer (as chitthi_app)', () => {
       await send(pool, c.id, a.id);
       expect(await unreadCount(pool, c.id, b.id)).toBe(3);
       expect(await unreadCount(pool, c.id, a.id)).toBe(0); // own messages never count
-      await deleteForEveryone(pool, { messageId: x.id, userId: a.id });
+      await deleteForEveryone(pool, { conversationId: x.conversationId, messageId: x.id, userId: a.id });
       expect(await unreadCount(pool, c.id, b.id)).toBe(2); // tombstones don't count
 
       expect(await markDelivered(pool, { conversationId: c.id, userId: b.id, seq: 3 })).toEqual({ lastReadSeq: 0, lastDeliveredSeq: 3 });
@@ -176,8 +176,8 @@ describe.skipIf(!url)('repository layer (as chitthi_app)', () => {
     await rejectsWith(markRead(pool, { ...s, seq: 1 }), 404, 'not_found');
     await rejectsWith(unreadCount(pool, c.id, stranger.id), 404, 'not_found');
     await rejectsWith(send(pool, c.id, stranger.id), 404, 'not_found');
-    await rejectsWith(editMessage(pool, { messageId: m.id, userId: stranger.id, body: 'x' }), 404, 'not_found');
-    await rejectsWith(deleteForEveryone(pool, { messageId: m.id, userId: stranger.id }), 404, 'not_found');
+    await rejectsWith(editMessage(pool, { conversationId: m.conversationId, messageId: m.id, userId: stranger.id, body: 'x' }), 404, 'not_found');
+    await rejectsWith(deleteForEveryone(pool, { conversationId: m.conversationId, messageId: m.id, userId: stranger.id }), 404, 'not_found');
     expect(await listConversations(pool, stranger.id)).toEqual([]);
   });
 });

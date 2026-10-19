@@ -29,11 +29,12 @@ export default defineConfig([
     languageOptions: { globals: globals.browser },
   },
   {
-    files: ['**/*.test.ts'],
+    files: ['**/*.test.ts', 'api/test/**/*.ts'],
     rules: {
-      // Tests poke at loosely typed HTTP bodies on purpose.
+      // Tests poke at loosely typed HTTP and socket payloads on purpose.
       '@typescript-eslint/no-unsafe-member-access': 'off',
       '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
     },
   },
   {

@@ -157,10 +157,10 @@ describe.skipIf(!url)('data model integrity (as chitthi_app)', () => {
       const cursor = before.nextCursor;
       expect(cursor).toBe(9); // the conversation's change_seq, although C saw nothing past 7
 
-      await editMessage(pool, { messageId: m2.id, userId: o.id, body: 'edited before C' });   // outside: invisible
-      await editMessage(pool, { messageId: m6.id, userId: o.id, body: 'welcome C (edited)' }); // inside: visible
-      await deleteForEveryone(pool, { messageId: m8.id, userId: o.id });                      // outside: invisible
-      await deleteForEveryone(pool, { messageId: m5.id, userId: c.id });                      // C erases own words after removal
+      await editMessage(pool, { conversationId: m2.conversationId, messageId: m2.id, userId: o.id, body: 'edited before C' });   // outside: invisible
+      await editMessage(pool, { conversationId: m6.conversationId, messageId: m6.id, userId: o.id, body: 'welcome C (edited)' }); // inside: visible
+      await deleteForEveryone(pool, { conversationId: m8.conversationId, messageId: m8.id, userId: o.id });                      // outside: invisible
+      await deleteForEveryone(pool, { conversationId: m5.conversationId, messageId: m5.id, userId: c.id });                      // C erases own words after removal
 
       const after = await catchUpByChange(pool, { conversationId: g.id, userId: c.id, afterChange: cursor });
       expect(after.messages.map((m) => [m.seq, m.body])).toEqual([[6, 'welcome C (edited)'], [5, null]]);
@@ -185,7 +185,7 @@ describe.skipIf(!url)('data model integrity (as chitthi_app)', () => {
     it('keeps a former member read-only: no send, no edit, markers capped at left_seq', async () => {
       const { c, g, m5 } = await scenario();
       await rejectsWith(send(pool, g.id, c.id), 403, 'read_only');
-      await rejectsWith(editMessage(pool, { messageId: m5.id, userId: c.id, body: 'too late' }), 403, 'read_only');
+      await rejectsWith(editMessage(pool, { conversationId: m5.conversationId, messageId: m5.id, userId: c.id, body: 'too late' }), 403, 'read_only');
       expect(await markRead(pool, { conversationId: g.id, userId: c.id, seq: 999 })).toEqual({ lastReadSeq: 7, lastDeliveredSeq: 7 });
       // Even a raw insert, bypassing the repository, is refused by the trigger.
       await expect(pool.query(
@@ -207,8 +207,8 @@ describe.skipIf(!url)('data model integrity (as chitthi_app)', () => {
     await rejectsWith(markRead(pool, { ...s, seq: 1 }), 404, 'not_found');
     await rejectsWith(markDelivered(pool, { ...s, seq: 1 }), 404, 'not_found');
     await rejectsWith(send(pool, c.id, stranger.id), 404, 'not_found');
-    await rejectsWith(editMessage(pool, { messageId: m.id, userId: stranger.id, body: 'x' }), 404, 'not_found');
-    await rejectsWith(deleteForEveryone(pool, { messageId: m.id, userId: stranger.id }), 404, 'not_found');
+    await rejectsWith(editMessage(pool, { conversationId: m.conversationId, messageId: m.id, userId: stranger.id, body: 'x' }), 404, 'not_found');
+    await rejectsWith(deleteForEveryone(pool, { conversationId: m.conversationId, messageId: m.id, userId: stranger.id }), 404, 'not_found');
     await rejectsWith(unreadCount(pool, c.id, stranger.id), 404, 'not_found');
     expect(await listConversations(pool, stranger.id)).toEqual([]);
     await expect(pool.query(
@@ -245,8 +245,8 @@ describe.skipIf(!url)('data model integrity (as chitthi_app)', () => {
     const { conversation: c } = await findOrCreateDirect(pool, a.id, b.id);
     const clientMsgId = randomUUID();
     const { message } = await sendMessage(pool, { conversationId: c.id, senderId: a.id, clientMsgId, body: 'regret' });
-    await editMessage(pool, { messageId: message.id, userId: a.id, body: 'regret (edited)' });
-    const tomb = await deleteForEveryone(pool, { messageId: message.id, userId: a.id });
+    await editMessage(pool, { conversationId: message.conversationId, messageId: message.id, userId: a.id, body: 'regret (edited)' });
+    const tomb = await deleteForEveryone(pool, { conversationId: message.conversationId, messageId: message.id, userId: a.id });
     expect(tomb).toMatchObject({ seq: message.seq, body: null });
 
     const { rows: [row] } = await pool.query<{ body: string | null; hash: Buffer | null; seq: number }>(
