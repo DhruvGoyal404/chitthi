@@ -25,7 +25,7 @@ export type Message = {
 export const MAX_BODY_CHARS = 4000;
 export const MAX_PAGE = 200;
 
-const MSG_COLUMNS = `m.id, m.conversation_id AS "conversationId", m.seq, m.updated_change_seq AS "changeSeq",
+export const MSG_COLUMNS = `m.id, m.conversation_id AS "conversationId", m.seq, m.updated_change_seq AS "changeSeq",
   m.sender_id AS "senderId", m.client_msg_id AS "clientMsgId", m.kind, m.body, m.meta,
   m.created_at AS "createdAt", m.edited_at AS "editedAt", m.deleted_at AS "deletedAt"`;
 

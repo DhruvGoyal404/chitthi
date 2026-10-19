@@ -4,6 +4,7 @@ import type { Logger } from 'pino';
 import { createApp } from './app.js';
 import type { Config } from './config.js';
 import { createRateLimits, type RateLimits } from './limits.js';
+import { attachFanout, CONV_CHANNEL } from './realtime/fanout.js';
 import { PgListener, SESSION_CHANNEL } from './realtime/listener.js';
 import { createRealtime, type Realtime, type RealtimeOptions } from './realtime/server.js';
 
@@ -35,13 +36,14 @@ export async function startApi(opts: StartOptions): Promise<Started> {
   const rateLimits = opts.rateLimits ?? createRateLimits(pool, logger);
   const app = createApp({ config, logger, pool, rateLimits });
   const httpServer = createServer(app);
-  const listener = new PgListener(config.databaseUrl, [SESSION_CHANNEL], logger, opts.listenerBackoff);
+  const listener = new PgListener(config.databaseUrl, [SESSION_CHANNEL, CONV_CHANNEL], logger, opts.listenerBackoff);
   const realtime = createRealtime({
     httpServer, pool, listener, logger,
     allowedOrigins: config.webOrigins,
     connectLimit: rateLimits.socket,
     ...opts.realtime,
   });
+  attachFanout(realtime, pool);
   // The LISTEN connection retries in the background, so an unreachable database never blocks startup.
   listener.start();
 
