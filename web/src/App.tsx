@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { Link, Route, Routes } from 'react-router';
+import { DevLogin } from './DevLogin.js';
 import { api, ApiError } from './lib/api.js';
 
 type Health = { status: 'ok' | 'degraded'; db: 'ok' | 'unreachable' };
@@ -50,6 +51,7 @@ function Home() {
         Chitthi is a real-time chat app under construction. Messages are not end-to-end encrypted: the server can read them.
       </p>
       <HealthBadge />
+      <DevLogin />
     </section>
   );
 }
