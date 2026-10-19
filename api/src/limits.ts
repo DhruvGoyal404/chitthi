@@ -12,11 +12,14 @@ export type Limits = {
   auth: Limit;
   /** Per user, across message sends, edits and deletes. */
   send: Limit;
+  /** Socket connections per user. */
+  socket: Limit;
 };
 
 export const DEFAULT_LIMITS: Limits = {
   auth: { points: 30, duration: 10 * 60 },
   send: { points: 120, duration: 60 },
+  socket: { points: 30, duration: 60 },
 };
 
 export type RateLimit = (key: string) => Promise<void>;
@@ -53,7 +56,7 @@ export function createRateLimits(pool: pg.Pool, logger: Logger, limits: Limits =
       }
     };
   };
-  return { auth: make('auth'), send: make('send') };
+  return { auth: make('auth'), send: make('send'), socket: make('socket') };
 }
 
 /** Express middleware: limit by a key derived from the request (429 with Retry-After when exceeded). */

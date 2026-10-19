@@ -105,7 +105,7 @@ describe.skipIf(!apiUrl)('REST API (sends, edits, deletes, sync reads)', () => {
   });
 
   it('rate-limits sends per user', async () => {
-    const limited = testApp(pool, apiUrl, { auth: { points: 100, duration: 60 }, send: { points: 2, duration: 60 } });
+    const limited = testApp(pool, apiUrl, { auth: { points: 100, duration: 60 }, send: { points: 2, duration: 60 }, socket: { points: 100, duration: 60 } });
     const a = await signIn(limited, 'rl');
     const b = await signIn(limited, 'rl');
     const id = (await as(limited, a).post('/conversations/direct', { userId: b.id })).body.conversation.id as string;
