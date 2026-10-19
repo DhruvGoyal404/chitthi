@@ -6,6 +6,8 @@ import type { Config } from './config.js';
 import { createRateLimits, type RateLimits } from './limits.js';
 import { attachFanout, CONV_CHANNEL } from './realtime/fanout.js';
 import { PgListener, SESSION_CHANNEL } from './realtime/listener.js';
+import { attachReceipts, deliveredHandler } from './realtime/receipts.js';
+import { createTyping, DEFAULT_TYPING, type TypingTuning } from './realtime/typing.js';
 import { createRealtime, type Realtime, type RealtimeOptions } from './realtime/server.js';
 
 export type Started = {
@@ -25,6 +27,8 @@ export type StartOptions = {
   /** Overrides for tests (inbound rate limit, listener backoff). */
   realtime?: Pick<RealtimeOptions, 'rateLimit'>;
   listenerBackoff?: { minMs: number; maxMs: number };
+  /** Timers for ephemeral state (tests shorten them). */
+  tuning?: { typing?: TypingTuning };
 };
 
 /**
@@ -37,13 +41,18 @@ export async function startApi(opts: StartOptions): Promise<Started> {
   const app = createApp({ config, logger, pool, rateLimits });
   const httpServer = createServer(app);
   const listener = new PgListener(config.databaseUrl, [SESSION_CHANNEL, CONV_CHANNEL], logger, opts.listenerBackoff);
+  const typing = createTyping(pool, opts.tuning?.typing ?? DEFAULT_TYPING);
   const realtime = createRealtime({
     httpServer, pool, listener, logger,
     allowedOrigins: config.webOrigins,
     connectLimit: rateLimits.socket,
+    // The only events a client may send. Message writes are REST-only.
+    inbound: { typing: typing.handler, delivered: deliveredHandler(pool) },
     ...opts.realtime,
   });
   attachFanout(realtime, pool);
+  attachReceipts(realtime, pool);
+  typing.attach(realtime);
   // The LISTEN connection retries in the background, so an unreachable database never blocks startup.
   listener.start();
 

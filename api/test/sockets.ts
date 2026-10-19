@@ -13,7 +13,7 @@ export type TestServer = Started & { lines: string[] };
 export async function startTestServer(
   pool: pg.Pool,
   apiUrl: string,
-  opts: { limits?: Limits } & Pick<StartOptions, 'realtime' | 'listenerBackoff'> = {},
+  opts: { limits?: Limits } & Pick<StartOptions, 'realtime' | 'listenerBackoff' | 'tuning'> = {},
 ): Promise<TestServer> {
   const config = testConfig({ DATABASE_URL: apiUrl, DEV_LOGIN: 'true', HOST: '127.0.0.1', PORT: '0' });
   const { logger, lines } = captureLogger(config);
