@@ -12,6 +12,8 @@ const schema = z
     HOST: z.string().min(1).default('127.0.0.1'),
     PORT: z.coerce.number().int().min(0).max(65535).default(8082),
     DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+    // Role every API connection switches to at start-up (least privilege; see docs/SCHEMA.md §3).
+    DATABASE_ROLE: z.preprocess((v) => (v === '' ? undefined : v), z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/).optional()),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
     // Comma-separated origins allowed to send state-changing requests and open WebSockets.
     WEB_ORIGINS: z
@@ -36,6 +38,7 @@ export type Config = {
   host: string;
   port: number;
   databaseUrl: string;
+  databaseRole: string | undefined;
   logLevel: string;
   webOrigins: string[];
   devLogin: boolean;
@@ -58,6 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     host: e.HOST,
     port: e.PORT,
     databaseUrl: e.DATABASE_URL,
+    databaseRole: e.DATABASE_ROLE,
     logLevel: e.LOG_LEVEL,
     webOrigins: e.WEB_ORIGINS,
     devLogin: e.DEV_LOGIN,

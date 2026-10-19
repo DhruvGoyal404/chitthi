@@ -1,5 +1,7 @@
 import type { Request, RequestHandler, Response } from 'express';
-import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
+import type pg from 'pg';
+import type { Logger } from 'pino';
+import { RateLimiterPostgres, RateLimiterRes } from 'rate-limiter-flexible';
 import { HttpError } from './errors.js';
 
 /** `points` actions per `duration` seconds. */
@@ -18,19 +20,33 @@ export type RateLimit = (key: string) => Promise<void>;
 export type RateLimits = Record<keyof Limits, RateLimit>;
 
 /**
- * In-memory limiters for Phase 1. They move to the Postgres store (a `rate_limits` table) with
- * the domain schema, so limits hold across restarts and API instances.
+ * Limiters on the Postgres store (the rate_limits table, created by a migration), so limits hold
+ * across restarts and API instances with no new infrastructure. A limiter that can't reach its
+ * store lets the request through and logs it: failing open keeps the app usable, and anything
+ * that can't reach Postgres can't do much else either. `namespace` prefixes every key (tests use
+ * it to get counters of their own).
  */
-export function createRateLimits(limits: Limits = DEFAULT_LIMITS): RateLimits {
+export function createRateLimits(pool: pg.Pool, logger: Logger, limits: Limits = DEFAULT_LIMITS, namespace = ''): RateLimits {
   const make = (name: keyof Limits): RateLimit => {
-    const limiter = new RateLimiterMemory({ keyPrefix: name, points: limits[name].points, duration: limits[name].duration });
+    const limiter = new RateLimiterPostgres({
+      storeClient: pool,
+      storeType: 'pool',
+      tableName: 'rate_limits',
+      tableCreated: true,
+      clearExpiredByTimeout: false,
+      keyPrefix: `${namespace}${name}`,
+      points: limits[name].points,
+      duration: limits[name].duration,
+    });
     return async (key: string) => {
       try {
         await limiter.consume(key);
       } catch (err) {
-        if (!(err instanceof RateLimiterRes)) throw err;
-        const retryAfterSeconds = Math.max(1, Math.ceil(err.msBeforeNext / 1000));
-        throw new HttpError(429, 'rate_limited', `Too many requests. Try again in ${String(retryAfterSeconds)} s.`, { retryAfterSeconds });
+        if (err instanceof RateLimiterRes) {
+          const retryAfterSeconds = Math.max(1, Math.ceil(err.msBeforeNext / 1000));
+          throw new HttpError(429, 'rate_limited', `Too many requests. Try again in ${String(retryAfterSeconds)} s.`, { retryAfterSeconds });
+        }
+        logger.error({ err, limiter: name }, 'rate limiter store failed; allowing the request');
       }
     };
   };

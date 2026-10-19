@@ -10,17 +10,12 @@ import { errorHandler, notFound } from './errors.js';
 import { healthRouter } from './health.js';
 import { createRateLimits, limitBy, type RateLimits } from './limits.js';
 import { requireAllowedOrigin } from './origin.js';
-import { MemorySessionStore, type SessionStore } from './sessions.js';
+import { SessionStore } from './sessions.js';
 
-export type AppDeps = {
-  config: Config;
-  logger: Logger;
-  pool: pg.Pool;
-  sessions?: SessionStore;
-  rateLimits?: RateLimits;
-};
+export type AppDeps = { config: Config; logger: Logger; pool: pg.Pool; rateLimits?: RateLimits };
 
-export function createApp({ config, logger, pool, sessions = new MemorySessionStore(), rateLimits = createRateLimits() }: AppDeps): Express {
+export function createApp({ config, logger, pool, rateLimits = createRateLimits(pool, logger) }: AppDeps): Express {
+  const sessions = new SessionStore(pool);
   const app = express();
   app.disable('x-powered-by');
   // The API only ever answers with JSON, so its own CSP can forbid everything.
@@ -37,7 +32,7 @@ export function createApp({ config, logger, pool, sessions = new MemorySessionSt
   api.use(meRouter(sessions));
   if (config.devLogin) {
     logger.warn('dev login enabled: anyone can sign in as any handle');
-    api.use(devLoginRouter(config.nodeEnv, sessions));
+    api.use(devLoginRouter(config.nodeEnv, pool, sessions));
   }
   app.use('/api', api);
 

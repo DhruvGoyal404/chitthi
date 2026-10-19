@@ -15,7 +15,7 @@ try {
 }
 
 const logger = createLogger(config.logLevel, { secrets: secretsOf(config) });
-const pool = createPool(config.databaseUrl, logger);
+const pool = createPool(config.databaseUrl, logger, { role: config.databaseRole });
 const app = createApp({ config, logger, pool });
 
 // Last line of defence: log and keep serving. Express 5 already routes rejected handler
