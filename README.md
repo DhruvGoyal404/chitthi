@@ -2,7 +2,7 @@
 
 A real-time chat app: 1:1 and group conversations, durable ordered history, read receipts, presence and typing indicators.
 
-> **Status: early rewrite (Phase 1, foundations).** Nothing user-facing works yet beyond a health check and a development sign-in shortcut.
+> **Status: rewrite in progress.** The API (data model, REST, real-time delivery) is built and tested; the web app is a skeleton until the frontend phase.
 
 **Not end-to-end encrypted.** Messages are stored in plaintext on the server, which can read them. There are no voice or video calls.
 
@@ -27,6 +27,8 @@ npm run dev:web             # http://localhost:5175
 ## Docs
 
 - [docs/AUDIT.md](docs/AUDIT.md): audit of the legacy codebase and the plan for this rewrite.
+- [docs/SCHEMA.md](docs/SCHEMA.md): the data model and what the database enforces.
+- [docs/REALTIME.md](docs/REALTIME.md): real-time delivery, the guarantees, failure modes and the client sync contract.
 - [CLAUDE.md](CLAUDE.md): invariants, phases and working rules.
 
 ## Licence
