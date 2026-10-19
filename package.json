@@ -1,0 +1,34 @@
+{
+  "name": "chitthi",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "api",
+    "web"
+  ],
+  "engines": {
+    "node": ">=22.12.0 <23"
+  },
+  "scripts": {
+    "dev:api": "npm run dev -w api",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w api && npm run build -w web",
+    "typecheck": "npm run typecheck -w api && npm run typecheck -w web",
+    "lint": "eslint .",
+    "test": "npm test -w api && npm test -w web",
+    "db:migrate": "dbmate --no-dump-schema --wait up",
+    "db:rollback": "dbmate --no-dump-schema rollback",
+    "db:new": "dbmate new"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "dbmate": "2.36.0",
+    "eslint": "10.12.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "globals": "17.13.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
+  }
+}
