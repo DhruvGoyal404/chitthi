@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# build and tool output
+dist/
+build/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# env files (only the example is tracked)
+.env
+.env.*
+!.env.example
+
+# user uploads (local dev storage)
+uploads/
+
+# logs and OS cruft
+*.log
+logs/
+.DS_Store
+Thumbs.db
