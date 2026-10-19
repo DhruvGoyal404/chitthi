@@ -1,0 +1,42 @@
+# Local development services for Chitthi. Project name, ports and volume names follow the
+# coexistence rules in CLAUDE.md: host port 5435 only, volume chitthi_pg, 256 MB memory cap.
+name: chitthi
+
+services:
+  db:
+    # postgres 18.6 on Alpine 3.24 (pushed 2026-09-21), pinned by multi-arch index digest.
+    image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    environment:
+      POSTGRES_USER: chitthi
+      POSTGRES_DB: chitthi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # Sized for the 256 MB cap: small shared_buffers, few connections.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=128MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=40
+    ports:
+      - "127.0.0.1:5435:5432"
+    # Postgres 18 images keep data under /var/lib/postgresql/18/docker; mount the parent.
+    volumes:
+      - pg:/var/lib/postgresql
+    mem_limit: 256m
+    shm_size: 64m
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chitthi -d chitthi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pg:
+    name: chitthi_pg
