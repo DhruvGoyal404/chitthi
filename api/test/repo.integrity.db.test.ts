@@ -9,7 +9,7 @@ import { makeUsers, rejectsWith, send } from './fixtures.js';
 
 // Integrity properties of the data model, exercised the way the API runs: every query as
 // chitthi_app, concurrency through a real pool (25 connections) against Postgres 18.
-const url = inject('dbUrl');
+const url = inject('apiDbUrl');
 
 const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
 

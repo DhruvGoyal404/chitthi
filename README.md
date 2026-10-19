@@ -15,10 +15,11 @@ Node 22 · TypeScript · Express 5 · PostgreSQL 18 · Socket.IO · React 19 · 
 Requirements: Node 22.12 or later, and Docker.
 
 ```sh
-cp .env.example .env        # then set POSTGRES_PASSWORD (and the matching password in DATABASE_URL)
+cp .env.example .env        # then set the owner and chitthi_api passwords (see comments inside)
 npm ci
 docker compose up -d db     # Postgres on 127.0.0.1:5435
 npm run db:migrate
+npm run db:api-password     # sets the chitthi_api login from DATABASE_URL
 npm run dev:api             # http://127.0.0.1:8082/api/health
 npm run dev:web             # http://localhost:5175
 ```

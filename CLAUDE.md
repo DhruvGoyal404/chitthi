@@ -15,7 +15,7 @@ Stretch goals, only after Phase 7: message search (Postgres full-text) and web p
 
 - `api/`: Node 22, TypeScript (strict), Express 5, zod, pg, pino, and Socket.IO 4 (added in Phase 4).
 - `web/`: Vite, React 19, TypeScript (strict), Tailwind v4, TanStack Query, React Router 7.
-- `db/migrations/`: dbmate SQL migrations. Run them from the repo root with `npm run db:migrate`, which reads `DATABASE_URL` from `.env`.
+- `db/migrations/`: dbmate SQL migrations. Run them from the repo root with `npm run db:migrate`, which uses the owner's `MIGRATION_DATABASE_URL` from `.env`. The API itself always logs in as `chitthi_api`, a member of `chitthi_app` with no other privileges, in dev as well as prod. The owner role is for migrations and tests only.
 - The repo is a single npm workspace with one `package-lock.json`.
 
 ## Invariants
@@ -69,7 +69,8 @@ These hold for every change. A change that breaks one of them is a bug, even if 
 ```
 npm ci                      # install (root, all workspaces)
 docker compose up -d db     # Postgres 18 on 127.0.0.1:5435 (project "chitthi")
-npm run db:migrate          # dbmate up
+npm run db:migrate          # dbmate up, as the owner (MIGRATION_DATABASE_URL)
+npm run db:api-password     # set the chitthi_api login password from DATABASE_URL
 npm run dev:api             # API on 127.0.0.1:8082
 npm run dev:web             # web on http://localhost:5175 (proxies /api, including WebSockets, to 8082)
 npm run typecheck && npm run lint && npm test

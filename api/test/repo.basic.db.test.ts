@@ -9,7 +9,7 @@ import {
 import { appPool } from './dbhelpers.js';
 import { makeUsers, rejectsWith, send } from './fixtures.js';
 
-const url = inject('dbUrl');
+const url = inject('apiDbUrl');
 
 describe.skipIf(!url)('repository layer (as chitthi_app)', () => {
   const pool = appPool(url);

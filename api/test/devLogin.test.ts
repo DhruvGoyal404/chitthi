@@ -10,6 +10,7 @@ import { adminPool, appPool, uniqueHandle } from './dbhelpers.js';
 import { captureLogger, testConfig, UNREACHABLE_DB_URL, WEB_ORIGIN } from './helpers.js';
 
 const url = inject('dbUrl');
+const apiUrl = inject('apiDbUrl');
 
 describe('dev login guards (no database needed)', () => {
   it('is refused in production by both the config and the router', () => {
@@ -21,14 +22,14 @@ describe('dev login guards (no database needed)', () => {
 });
 
 describe.skipIf(!url)('dev login and Postgres sessions', () => {
-  const pool = appPool(url);
+  const pool = appPool(apiUrl);
   const admin = adminPool(url);
   afterAll(async () => {
     await Promise.all([pool.end(), admin.end()]);
   });
 
   function setup(opts: { devLogin?: boolean; authPoints?: number } = {}) {
-    const config = testConfig({ DATABASE_URL: url, DEV_LOGIN: String(opts.devLogin ?? true) });
+    const config = testConfig({ DATABASE_URL: apiUrl, DEV_LOGIN: String(opts.devLogin ?? true) });
     const { logger } = captureLogger(config);
     // A namespace per app keeps each test's rate-limit counters separate in the shared table.
     const namespace = `t${randomBytes(4).toString('hex')}:`;
@@ -159,9 +160,17 @@ describe.skipIf(!url)('dev login and Postgres sessions', () => {
     expect((await request(app).get('/api/me')).status).toBe(401);
   });
 
-  it('runs as chitthi_app', async () => {
-    const { rows } = await pool.query<{ r: string }>('SELECT current_user AS r');
-    expect(rows[0]?.r).toBe('chitthi_app');
+  it('logs in as chitthi_api: a member of chitthi_app and nothing more', async () => {
+    const { rows: [me] } = await pool.query<{ who: string; app: boolean; super: boolean; createdb: boolean; createrole: boolean; bypassrls: boolean; replication: boolean; roles: string[] }>(
+      `SELECT current_user AS who, pg_has_role(current_user, 'chitthi_app', 'USAGE') AS app,
+              r.rolsuper AS super, r.rolcreatedb AS createdb, r.rolcreaterole AS createrole, r.rolbypassrls AS bypassrls,
+              r.rolreplication AS replication,
+              ARRAY(SELECT b.rolname::text FROM pg_auth_members m JOIN pg_roles b ON b.oid = m.roleid WHERE m.member = r.oid) AS roles
+         FROM pg_roles r WHERE r.rolname = current_user`,
+    );
+    expect(me).toEqual({ who: 'chitthi_api', app: true, super: false, createdb: false, createrole: false, bypassrls: false, replication: false, roles: ['chitthi_app'] });
+    await expect(pool.query('SET ROLE chitthi')).rejects.toThrow(/permission denied/);
+    await expect(pool.query('CREATE TABLE nope (x int)')).rejects.toThrow(/permission denied/);
     await expect(pool.query("UPDATE conversations SET last_seq = 99")).rejects.toThrow(/permission denied/);
   });
 });

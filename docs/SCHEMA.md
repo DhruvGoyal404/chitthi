@@ -44,7 +44,7 @@ This document explains the model, the rules the database enforces, and the queri
 4. **The change cursor** is bumped by the insert trigger and by `messages_before_update` on any edit or delete. A no-op update takes no value.
 5. **Erasure.** Setting `deleted_at` makes the trigger null the body and body hash. A tombstone can never change again.
 6. **Forward-only read markers**, capped at `max(coalesce(left_seq, last_seq))` over the user's periods.
-7. **Least privilege.** The API runs as `chitthi_app`, which has column-level grants: it can't write `seq`, `last_seq`, `change_seq`, `joined_seq`, `left_seq` or `updated_change_seq`, and can't DELETE messages, memberships or users. The `DATABASE_ROLE` setting makes every API connection start as `chitthi_app`.
+7. **Least privilege.** The API logs in as `chitthi_api` in every environment, dev included. That role is a member of `chitthi_app` and nothing else: not superuser, no createdb, createrole, replication or bypassrls, and it can't `SET ROLE` to the owner. `chitthi_app` has column-level grants only, so the API can't write `seq`, `last_seq`, `change_seq`, `joined_seq`, `left_seq` or `updated_change_seq`, can't DELETE messages, memberships or users, and can't even read `schema_migrations`. The owner role runs migrations (`MIGRATION_DATABASE_URL`) and test setup only. The `chitthi_api` password lives in `DATABASE_URL`, and `npm run db:api-password` applies it; it is never in a migration.
 
 ## 4. Queries
 
