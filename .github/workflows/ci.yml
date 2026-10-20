@@ -64,7 +64,62 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Bundle budget
+        run: npm run check:bundle
       - name: Audit (high and above)
         run: |
           set -o pipefail
           npm audit --audit-level=high 2>&1 | tee audit.log
+
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+        env:
+          POSTGRES_USER: chitthi
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: chitthi
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd "pg_isready -U chitthi -d chitthi"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      MIGRATION_DATABASE_URL: postgres://chitthi:ci-only-password@127.0.0.1:5435/chitthi?sslmode=disable
+      DATABASE_URL: postgres://chitthi_api:ci-only-api-password@127.0.0.1:5435/chitthi?sslmode=disable
+      # The API as the browser tests use it: dev sign-in on (test env only), the web origin allowed.
+      NODE_ENV: test
+      HOST: 127.0.0.1
+      PORT: "8082"
+      WEB_ORIGINS: http://localhost:5175
+      DEV_LOGIN: "true"
+      RATE_LIMIT_AUTH: "5000"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (npm ci)
+        run: npm ci
+      - name: Migrate
+        run: npm run db:migrate
+      - name: Set the API login password
+        run: npm run db:api-password
+      - name: Install Playwright Chromium (version pinned by package-lock)
+        run: npm run e2e:install -w web
+      - name: End-to-end tests (390 px and desktop, axe on every screen)
+        run: npm run e2e
+      - name: Upload the Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7

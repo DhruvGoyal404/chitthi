@@ -2,7 +2,8 @@ export type Token = { kind: 'text'; text: string } | { kind: 'link'; text: strin
 
 // Candidate URLs: an explicit http(s) scheme, then non-space characters. Anything else (javascript:,
 // data:, www.example.com without a scheme, mailto:) is left as plain text.
-const CANDIDATE = /\bhttps?:\/\/[^\s<>"'`]+/gi;
+// A third slash ("http:///x") is rejected: the URL parser would quietly retarget it.
+const CANDIDATE = /\bhttps?:\/\/(?!\/)[^\s<>"'`]+/gi;
 // Punctuation that usually ends a sentence rather than a URL.
 const TRAILING = /[.,;:!?)\]}'"]+$/;
 

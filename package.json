@@ -20,7 +20,9 @@
     "db:migrate": "dbmate --env MIGRATION_DATABASE_URL --no-dump-schema --wait up",
     "db:api-password": "node --env-file-if-exists=.env scripts/set-api-db-password.mjs",
     "db:rollback": "dbmate --env MIGRATION_DATABASE_URL --no-dump-schema rollback",
-    "db:new": "dbmate new"
+    "db:new": "dbmate new",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "e2e": "npm run e2e -w web"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
