@@ -10,7 +10,8 @@ import { captureLogger, testConfig, WEB_ORIGIN } from './helpers.js';
 
 export type Signed = { id: string; handle: string; cookie: string };
 
-export const GENEROUS: Limits = { auth: { points: 10_000, duration: 60 }, send: { points: 10_000, duration: 60 }, socket: { points: 10_000, duration: 60 }, search: { points: 10_000, duration: 60 } };
+const lots = { points: 100_000, duration: 60 };
+export const GENEROUS: Limits = { auth: lots, sendBurst: lots, send: lots, socket: lots, search: lots, newDm: lots, groupCreate: lots, memberAdd: lots };
 
 /** The real app, logged in to Postgres as chitthi_api, with dev sign-in on and its own rate-limit namespace. */
 export function testApp(pool: pg.Pool, apiUrl: string, limits: Limits = GENEROUS): Express {

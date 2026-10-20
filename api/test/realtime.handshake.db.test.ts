@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
-import { as, signIn } from './apphelpers.js';
+import { as, GENEROUS, signIn } from './apphelpers.js';
 import { adminPool, appPool } from './dbhelpers.js';
 import { WEB_ORIGIN } from './helpers.js';
 import { connect, connected, disconnected, socketFor, startTestServer, type TestServer } from './sockets.js';
@@ -102,7 +102,7 @@ describe.skipIf(!apiUrl)('socket handshake and session lifetime', () => {
 
   it('limits connections per user', async () => {
     const strict = await startTestServer(pool, apiUrl, {
-      limits: { auth: { points: 100, duration: 60 }, send: { points: 100, duration: 60 }, socket: { points: 2, duration: 60 }, search: { points: 2, duration: 60 } },
+      limits: { ...GENEROUS, socket: { points: 2, duration: 60 } },
     });
     try {
       const u = await signIn(strict.url);

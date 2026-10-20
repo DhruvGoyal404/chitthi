@@ -1,4 +1,4 @@
-import { Router, type Response } from 'express';
+import { Router, type RequestHandler, type Response } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
 import { requireSession, sessionOf } from './auth.js';
@@ -27,7 +27,9 @@ const messagesQuery = z
   .object({ before: seq.optional(), after: seq.optional(), limit })
   .refine((q) => q.before === undefined || q.after === undefined, 'use before or after, not both');
 const changesQuery = z.object({ after: seq, limit });
-const searchQuery = z.object({ q: z.string().trim().regex(/^[A-Za-z0-9_]{2,20}$/, '2–20 characters: letters, digits or _') });
+// At least 3 characters, and at most SEARCH_RESULTS answers: a search can't list the directory.
+const searchQuery = z.object({ q: z.string().trim().regex(/^[A-Za-z0-9_]{3,20}$/, '3–20 characters: letters, digits or _') });
+const SEARCH_RESULTS = 8;
 
 /** Path ids are validated like everything else: a malformed id is simply not found. */
 function pathId(value: unknown, what: string): string {
@@ -45,16 +47,21 @@ const me = (res: Response) => sessionOf(res).user.id;
 export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: RateLimits): Router {
   const r = Router();
   r.use(['/conversations', '/users'], requireSession(sessions));
-  const sendLimit = limitBy(rateLimits.send, (_req, res) => me(res));
+  // Burst first: a quick flurry is stopped by the short window without draining the long one.
+  const sendLimit: RequestHandler = async (_req, res, next) => {
+    await rateLimits.sendBurst(me(res));
+    await rateLimits.send(me(res));
+    next();
+  };
   const searchLimit = limitBy(rateLimits.search, (_req, res) => me(res));
 
   r.get('/users', searchLimit, async (req, res) => {
     const { q } = searchQuery.parse(req.query);
-    res.json({ users: await searchUsers(pool, q, me(res)) });
+    res.json({ users: await searchUsers(pool, q, me(res), SEARCH_RESULTS) });
   });
 
-  r.get('/users/:handle', async (req, res) => {
-    const user = await findUserByHandle(pool, req.params.handle);
+  r.get('/users/:handle', searchLimit, async (req, res) => {
+    const user = await findUserByHandle(pool, String(req.params.handle));
     if (!user) throw new HttpError(404, 'user_not_found', 'User not found');
     res.json({ user });
   });
@@ -69,18 +76,22 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
 
   r.post('/conversations/direct', async (req, res) => {
     const { userId } = directBody.parse(req.body);
-    const { conversation, created } = await findOrCreateDirect(pool, me(res), userId);
+    // Only creating a DM counts; reopening an existing one is always allowed.
+    const { conversation, created } = await findOrCreateDirect(pool, me(res), userId, () => rateLimits.newDm(me(res)));
     res.status(created ? 201 : 200).json({ conversation });
   });
 
   r.post('/conversations', async (req, res) => {
     const { title, memberIds } = groupBody.parse(req.body);
+    await rateLimits.groupCreate(me(res));
+    if (memberIds.length > 0) await rateLimits.memberAdd(me(res), memberIds.length);
     res.status(201).json({ conversation: await createGroup(pool, { creatorId: me(res), title, memberIds }) });
   });
 
   r.post('/conversations/:id/members', async (req, res) => {
     const { userId, role } = addMemberBody.parse(req.body);
     const conversationId = pathId(req.params.id, 'Conversation');
+    await rateLimits.memberAdd(me(res));
     res.status(201).json(await addMember(pool, { conversationId, actorId: me(res), userId, ...(role && { role }) }));
   });
 

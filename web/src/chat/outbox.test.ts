@@ -81,6 +81,15 @@ describe('optimistic send reconciliation', () => {
     expect(outbox.retryable()).toEqual([]);
   });
 
+  it('a rate-limited send is failed but retryable, with the reason kept for the bubble', () => {
+    const { outbox } = setup();
+    outbox.add({ clientMsgId: 'r', conversationId: 'c', body: 'quick', createdAt: '' });
+    outbox.fail('r', undefined, "You're sending quickly. Wait a moment, then retry.");
+    expect(outbox.list('c')[0]).toMatchObject({ status: 'failed', note: "You're sending quickly. Wait a moment, then retry." });
+    expect(outbox.retryable().map((p) => p.clientMsgId)).toEqual(['r']);
+    expect(outbox.retry('r')).not.toHaveProperty('note'); // a retry clears it
+  });
+
   it('an edit that arrives before the stale original push is never undone', async () => {
     const { socket, engine, view } = setup();
     const v1 = stored(1, 'k1', 'draft');

@@ -68,3 +68,22 @@ A provider identity seen for the first time does not create a user. It creates a
   - `POST /api/auth/logout-all` revokes every session of the account ("Sign out everywhere").
   - A trigger on `sessions` notifies the realtime server, which disconnects the affected sockets at once. This is tested for both routes.
 - **Origin check.** Every state-changing request needs an allow-listed `Origin`, and so does the WebSocket upgrade.
+
+## Rate limits
+
+All limits use `rate-limiter-flexible`'s Postgres store (the `rate_limits` table), so they hold across restarts and API instances without a new service. If the store is unreachable, the limiter lets the request through and logs it.
+
+When a limit stops a request, the API answers `429` with `Retry-After`, `error.code = "rate_limited"`, `error.details.limit` (which limit), and a calm sentence the UI shows as it is. Defaults are in [`api/src/limits.ts`](../api/src/limits.ts):
+
+| Limit | Key | Default | Notes |
+|---|---|---|---|
+| Sign-in | client IP | 30 / 10 min | OAuth start and callback, onboarding, dev sign-in. Listing providers and identities is exempt. The IP comes from `TRUST_PROXY`. |
+| Send burst | user | 30 / 10 s | Sends, edits and deletes. |
+| Send sustained | user | 400 / 10 min | Checked after the burst limit. A fast typist sends one message every couple of seconds, far below either. |
+| New DMs | user | 50 / day | Only creating a DM counts; reopening an existing one is always allowed. |
+| Group creation | user | 20 / day | |
+| Member adds | user | 300 / day | A new group's initial members count too. |
+| Handle search | user | 60 / min | Shared with exact handle lookups. Needs at least 3 characters and returns at most 8 people, so the directory can't be listed. |
+| Socket connects | user | 30 / min | Checked in the handshake. |
+
+In the web app, an optimistic send that gets a 429 becomes "failed" with the server's explanation and a Retry button. A retry uses the same client message id, so it is stored at most once. Other screens show the message where the action was taken.

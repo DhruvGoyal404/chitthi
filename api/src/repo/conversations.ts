@@ -34,7 +34,11 @@ async function requireLiveUsers(q: Queryable, ids: readonly string[]): Promise<v
  * holds the ordered pair under a unique constraint; two concurrent first calls race on it and the
  * loser rolls back and returns the winner's conversation.
  */
-export async function findOrCreateDirect(pool: pg.Pool, userId: string, otherId: string): Promise<{ conversation: Conversation; created: boolean }> {
+export async function findOrCreateDirect(
+  pool: pg.Pool, userId: string, otherId: string,
+  /** Runs only when a new conversation is about to be created (e.g. a rate limit); may throw. */
+  beforeCreate?: () => Promise<void>,
+): Promise<{ conversation: Conversation; created: boolean }> {
   assertUuid(otherId, 'User', 400);
   if (userId === otherId) throw new HttpError(400, 'invalid_request', 'You cannot start a conversation with yourself');
   const [lo, hi] = userId < otherId ? [userId, otherId] : [otherId, userId];
@@ -49,6 +53,7 @@ export async function findOrCreateDirect(pool: pg.Pool, userId: string, otherId:
   const existing = await find();
   if (existing) return { conversation: existing, created: false };
   await requireLiveUsers(pool, [userId, otherId]);
+  await beforeCreate?.();
   try {
     const conversation = await withTx(pool, async (tx) => {
       const { rows: [conv] } = await tx.query<Conversation>(

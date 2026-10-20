@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Avatar, Field, Icon } from '../components/ui.js';
+import { ApiError } from '../lib/api.js';
 import type { User } from '../lib/types.js';
 import { useUserSearch } from '../queries.js';
 
@@ -11,7 +12,8 @@ export function MemberPicker({ onPick, exclude, label = 'Add people by handle' }
   return (
     <div className="space-y-2">
       <Field id="member-search" label={label} type="search" value={q} autoComplete="off" autoCapitalize="none" spellCheck={false}
-        onChange={(e) => { setQ(e.target.value); }} />
+        hint="At least 3 characters." onChange={(e) => { setQ(e.target.value); }} />
+      {results.isError && <p role="alert" className="text-sm text-stamp">{results.error instanceof ApiError ? results.error.message : 'Search failed. Try again.'}</p>}
       <ul className="space-y-1" aria-live="polite">
         {shown.map((u) => (
           <li key={u.id}>

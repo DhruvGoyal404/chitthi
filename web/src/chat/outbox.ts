@@ -9,6 +9,8 @@ export type Pending = {
   createdAt: string;
   /** Why it failed, when the server said (a retry would not help, e.g. too long). */
   error?: string;
+  /** Why it failed when a retry WILL help later (e.g. sending too fast): shown with the Retry button. */
+  note?: string;
 };
 
 /**
@@ -49,10 +51,10 @@ export class Outbox {
     return next;
   }
 
-  fail(clientMsgId: string, error?: string): void {
+  fail(clientMsgId: string, error?: string, note?: string): void {
     const p = this.items.get(clientMsgId);
     if (!p) return;
-    this.items.set(clientMsgId, { ...p, status: 'failed', ...(error !== undefined && { error }) });
+    this.items.set(clientMsgId, { ...p, status: 'failed', ...(error !== undefined && { error }), ...(note !== undefined && { note }) });
     this.changed(p.conversationId);
   }
 

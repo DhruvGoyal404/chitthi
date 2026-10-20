@@ -6,6 +6,7 @@ import { loadConfig } from '../src/config.js';
 import { devLoginRouter } from '../src/devLogin.js';
 import { createRateLimits } from '../src/limits.js';
 import { hashSessionToken, SESSION_COOKIE, SessionStore } from '../src/sessions.js';
+import { GENEROUS } from './apphelpers.js';
 import { adminPool, appPool, uniqueHandle } from './dbhelpers.js';
 import { captureLogger, testConfig, UNREACHABLE_DB_URL, WEB_ORIGIN } from './helpers.js';
 
@@ -33,7 +34,7 @@ describe.skipIf(!url)('dev login and Postgres sessions', () => {
     const { logger } = captureLogger(config);
     // A namespace per app keeps each test's rate-limit counters separate in the shared table.
     const namespace = `t${randomBytes(4).toString('hex')}:`;
-    const rateLimits = createRateLimits(pool, logger, { auth: { points: opts.authPoints ?? 100, duration: 60 }, send: { points: 1000, duration: 60 }, socket: { points: 1000, duration: 60 }, search: { points: 1000, duration: 60 } }, namespace);
+    const rateLimits = createRateLimits(pool, logger, { ...GENEROUS, auth: { points: opts.authPoints ?? 100, duration: 60 } }, namespace);
     return createApp({ config, logger, pool, rateLimits });
   }
 

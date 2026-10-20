@@ -138,8 +138,10 @@ export class RealtimeClient {
       this.outbox.remove(clientMsgId);
     } catch (e) {
       // 4xx (other than timeouts and rate limits) won't succeed on retry: show the server's reason.
+      // A rate limit is "failed, retry" with the server's calm explanation.
       const permanent = e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
-      this.outbox.fail(clientMsgId, permanent ? e.message : undefined);
+      const limited = e instanceof ApiError && e.status === 429;
+      this.outbox.fail(clientMsgId, permanent ? e.message : undefined, limited ? e.message : undefined);
     }
   }
 

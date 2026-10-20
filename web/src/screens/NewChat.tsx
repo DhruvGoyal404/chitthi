@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { Avatar, Field, Icon, TopBar } from '../components/ui.js';
-import { api } from '../lib/api.js';
+import { api, ApiError } from '../lib/api.js';
 import type { User } from '../lib/types.js';
 import { useUserSearch } from '../queries.js';
 import { BackLink } from './Shell.js';
@@ -30,12 +30,14 @@ export function NewChat() {
           <span className="font-medium text-ink">New group</span>
         </Link>
         <Field id="search" label="Find someone by handle" type="search" value={q} autoComplete="off" autoCapitalize="none" spellCheck={false}
-          hint="Type at least 2 characters." onChange={(e) => { setQ(e.target.value); }} />
+          hint="Type at least 3 characters of their handle." onChange={(e) => { setQ(e.target.value); }} />
         <div aria-live="polite">
           {results.isFetching && <p className="text-sm text-ink-soft">Searching…</p>}
           {results.data?.length === 0 && <p className="text-sm text-ink-soft">Nobody with a handle starting “{q.trim()}”.</p>}
+          {results.data?.length === 8 && <p className="text-sm text-ink-soft">Showing the first 8. Type more of the handle to narrow it down.</p>}
+          {results.isError && <p role="alert" className="text-sm text-stamp">{results.error instanceof ApiError ? results.error.message : 'Search failed. Try again.'}</p>}
         </div>
-        {start.isError && <p role="alert" className="text-sm text-stamp">Could not start the conversation.</p>}
+        {start.isError && <p role="alert" className="text-sm text-stamp">{start.error instanceof ApiError ? start.error.message : 'Could not start the conversation.'}</p>}
         <ul className="space-y-1">
           {results.data?.map((u) => (
             <li key={u.id}>

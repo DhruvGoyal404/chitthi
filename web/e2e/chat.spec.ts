@@ -144,3 +144,26 @@ test('hostile message text renders inert: no script, no handler, no javascript: 
   await a.context.close();
   await b.context.close();
 });
+
+test('a send that hits the rate limit shows a calm "failed, retry", and the retry is stored once', async ({ browser }) => {
+  const a = await signedIn(browser, 'rlA');
+  const b = await signedIn(browser, 'rlB');
+  await openDm(a.page, b.handle);
+  const calm = "You're sending quickly. Wait a moment, then retry.";
+  // The API's 429 for sends, as it really answers (code, message, Retry-After).
+  await a.page.route('**/api/conversations/*/messages', (route) => route.request().method() === 'POST'
+    ? route.fulfill({ status: 429, headers: { 'Retry-After': '3' }, contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'rate_limited', message: calm, details: { retryAfterSeconds: 3, limit: 'sendBurst' } } }) })
+    : route.continue());
+  await send(a.page, 'one too many');
+  const bubble = log(a.page).locator('div.letter', { hasText: 'one too many' });
+  await expect(bubble.getByRole('alert')).toHaveText(calm);
+  await expect(bubble.locator('[data-tick="failed"]')).toBeVisible();
+
+  await a.page.unroute('**/api/conversations/*/messages');
+  await bubble.getByRole('button', { name: 'Retry' }).click();
+  await expect(tickOf(a.page, 'one too many')).toHaveAttribute('data-tick', /sent|delivered|read/);
+  await expect(log(a.page).getByText('one too many')).toHaveCount(1);
+  await a.context.close();
+  await b.context.close();
+});

@@ -24,7 +24,7 @@ export function MessageBubble({ item, mine, senderName, tick, infoHref, onEdit, 
   const stored = 'seq' in item ? item : null;
   const deleted = stored?.deletedAt != null;
   const body = stored ? stored.body : item.body;
-  const failed = isPending(item) && item.status === 'failed';
+  const failed = isPending(item) && item.status === 'failed' ? item : null;
   const canAct = stored !== null && mine && !deleted && stored.kind === 'text';
 
   return (
@@ -48,8 +48,8 @@ export function MessageBubble({ item, mine, senderName, tick, infoHref, onEdit, 
         </div>
         {failed && (
           <div className="mt-1 flex items-center justify-end gap-2 text-xs text-stamp">
-            <span role="alert">{'error' in item && item.error ? item.error : 'Not sent.'}</span>
-            {onRetry && !('error' in item && item.error) && (
+            <span role="alert">{failed.error ?? failed.note ?? 'Not sent.'}</span>
+            {onRetry && !failed.error && (
               <button type="button" onClick={onRetry} className="inline-flex min-h-8 items-center gap-1 rounded border border-stamp px-2 font-medium">
                 <Icon.Retry width={14} height={14} /> Retry
               </button>
