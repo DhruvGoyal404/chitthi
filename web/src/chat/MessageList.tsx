@@ -43,8 +43,10 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
 
   const rows: Row[] = useMemo(() => {
     const out: Row[] = [];
-    const firstUnread = p.items.findIndex((x) => !isPending(x) && x.seq > initialReadSeq && x.senderId !== meId && x.kind === 'text');
-    const unread = firstUnread < 0 ? 0 : p.items.slice(firstUnread).filter((x) => !isPending(x) && x.senderId !== meId && x.kind === 'text').length;
+    // Same definition as the API's unread count: live text from others after my read marker.
+    const isUnread = (x: Message | Pending) => !isPending(x) && x.seq > initialReadSeq && x.senderId !== meId && x.kind === 'text' && x.deletedAt === null;
+    const firstUnread = p.items.findIndex(isUnread);
+    const unread = p.items.filter(isUnread).length;
     p.items.forEach((x, i) => {
       if (i === firstUnread) out.push({ key: 'divider', type: 'divider', count: unread });
       if (isPending(x)) out.push({ key: `p:${x.clientMsgId}`, type: 'pending', item: x });

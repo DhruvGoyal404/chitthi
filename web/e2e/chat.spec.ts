@@ -91,6 +91,33 @@ test('edits and deletes propagate; a deleted message shows as deleted everywhere
   await b.context.close();
 });
 
+test('the "new" divider counts what the API counts as unread (not deleted messages)', async ({ browser }) => {
+  const a = await signedIn(browser, 'dvA');
+  const b = await signedIn(browser, 'dvB');
+  const id = await openDm(a.page, b.handle);
+  await send(a.page, 'keep me');
+  await send(a.page, 'delete me');
+  const doomed = log(a.page).locator('div.letter', { hasText: 'delete me' });
+  await doomed.getByRole('button', { name: 'Message options' }).click();
+  await a.page.getByRole('menuitem', { name: 'Delete…' }).click();
+  await a.page.getByRole('menuitem', { name: 'Delete for everyone' }).click();
+  await expect(log(a.page).getByText('message deleted')).toBeVisible();
+
+  await b.page.goto(`/c/${id}`);
+  await expect(log(b.page).getByRole('separator', { name: '1 new messages' })).toBeVisible();
+
+  // Message info opened directly (as from a link) shows the message itself.
+  const g = await a.page.request.post('/api/conversations', { data: { title: 'G', memberIds: [b.id] }, headers: { Origin: 'http://localhost:5175' } });
+  const gid = ((await g.json()) as { conversation: { id: string } }).conversation.id;
+  const m = await a.page.request.post(`/api/conversations/${gid}/messages`, { data: { clientMsgId: crypto.randomUUID(), body: 'info for this' }, headers: { Origin: 'http://localhost:5175' } });
+  const mid = ((await m.json()) as { message: { id: string } }).message.id;
+  await a.page.goto(`/c/${gid}/m/${mid}`);
+  await expect(a.page.getByRole('main').getByText('info for this')).toBeVisible();
+
+  await a.context.close();
+  await b.context.close();
+});
+
 test('hostile message text renders inert: no script, no handler, no javascript: links', async ({ browser }) => {
   const a = await signedIn(browser, 'xsA');
   const b = await signedIn(browser, 'xsB');

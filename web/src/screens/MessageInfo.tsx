@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
+import { useEffect } from 'react';
 import { useParams } from 'react-router';
 import { Linkified } from '../chat/Linkified.js';
 import { Avatar, TopBar } from '../components/ui.js';
 import { api } from '../lib/api.js';
 import { fullWhen } from '../lib/format.js';
-import { useMessages } from '../realtime/hooks.js';
+import { useMessages, useRealtime } from '../realtime/hooks.js';
 import { BackLink } from './Shell.js';
 
 type Receipt = { userId: string; handle: string; displayName: string; deliveredAt: string | null; readAt: string | null };
@@ -33,6 +34,9 @@ function Section({ title, people, when }: { title: string; people: Receipt[]; wh
 /** Group message info: who has read it, who has received it, who hasn't yet, and when. */
 export function MessageInfo() {
   const { id = '', messageId = '' } = useParams();
+  const rt = useRealtime();
+  // Opened directly (link, reload): load the conversation so the message itself can be shown.
+  useEffect(() => { void rt.engine.loadLatest(id); }, [rt, id]);
   const message = useMessages(id).find((m) => m.id === messageId);
   const receipts = useQuery({
     queryKey: ['receipts', id, messageId],
