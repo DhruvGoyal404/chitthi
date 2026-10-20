@@ -1,7 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, type SubmitEvent } from 'react';
-import { useNavigate } from 'react-router';
-import { Button, Field, TopBar } from '../components/ui.js';
+import { Link, useNavigate } from 'react-router';
+import { Avatar, Button, Field, TopBar } from '../components/ui.js';
+import { buttonClass } from '../components/styles.js';
 import { api, ApiError } from '../lib/api.js';
 import type { User } from '../lib/types.js';
 import { useMe, useSignOut } from '../session.js';
@@ -42,7 +43,10 @@ export function Settings() {
       <TopBar title="Settings" back={<BackLink />} />
       <div className="min-h-0 flex-1 space-y-8 overflow-y-auto p-4">
         <form onSubmit={onSubmit} className="space-y-4" aria-label="Profile">
-          <h2 className="text-sm font-medium text-ink-soft">Profile</h2>
+          <div className="flex items-center gap-3">
+            <Avatar name={me.data?.displayName ?? ''} src={me.data?.avatarUrl} size={48} />
+            <h2 className="text-sm font-medium text-ink-soft">Profile</h2>
+          </div>
           <Field id="display-name" label="Display name" value={displayName} maxLength={60} required
             onChange={(e) => { setDisplayName(e.target.value); }} />
           <Field id="handle" label="Handle" value={handle} autoCapitalize="none" spellCheck={false}
@@ -64,6 +68,7 @@ export function Settings() {
         </fieldset>
 
         <div className="space-y-2">
+          <Link to="/account" className={buttonClass('ghost')}>Account and sign-in</Link>
           <p className="text-sm text-ink-soft">Messages are not end-to-end encrypted: the server can read them.</p>
           <Button variant="ghost" onClick={() => { signOut.mutate(undefined, { onSettled: () => { void navigate('/signin', { replace: true }); } }); }}>
             Sign out

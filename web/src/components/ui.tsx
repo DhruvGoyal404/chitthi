@@ -1,4 +1,5 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SVGProps } from 'react';
+import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SVGProps } from 'react';
+import { buttonClass, type Variant } from './styles.js';
 
 type IconProps = SVGProps<SVGSVGElement> & { title?: string };
 
@@ -36,12 +37,18 @@ export const Icon = {
 const initials = (name: string) =>
   name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? '').join('') || '?';
 
-/** A postage-stamp avatar: initials on a perforated stamp. */
-export function Avatar({ name, size = 40, group = false }: { name: string; size?: number; group?: boolean }) {
+/**
+ * A postage-stamp avatar: initials on a perforated stamp, or the provider's picture (https only,
+ * checked by the database) when there is one. Sent without a Referer; falls back on error.
+ */
+export function Avatar({ name, size = 40, group = false, src }: { name: string; size?: number; group?: boolean; src?: string | null | undefined }) {
+  const [broken, setBroken] = useState(false);
   return (
-    <span aria-hidden className="relative inline-flex shrink-0 items-center justify-center rounded-[4px] border-2 border-dashed border-paper-edge bg-sheet font-semibold text-ink"
+    <span aria-hidden className="relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[4px] border-2 border-dashed border-paper-edge bg-sheet font-semibold text-ink"
       style={{ width: size, height: size, fontSize: size * 0.36 }}>
-      {group ? <Icon.Group width={size * 0.5} height={size * 0.5} /> : initials(name)}
+      {group ? <Icon.Group width={size * 0.5} height={size * 0.5} />
+        : src && !broken ? <img src={src} alt="" referrerPolicy="no-referrer" className="h-full w-full object-cover" onError={() => { setBroken(true); }} />
+        : initials(name)}
     </span>
   );
 }
@@ -54,13 +61,8 @@ export function PresenceDot({ online, className = '' }: { online: boolean; class
   );
 }
 
-export function Button({ variant = 'primary', className = '', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'ghost' | 'danger' }) {
-  const styles = {
-    primary: 'bg-ink text-paper hover:opacity-90',
-    ghost: 'border border-paper-edge text-ink hover:bg-paper-deep',
-    danger: 'border border-stamp text-stamp hover:bg-paper-deep',
-  }[variant];
-  return <button type="button" className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-md px-4 text-sm font-medium disabled:opacity-60 ${styles} ${className}`} {...rest} />;
+export function Button({ variant = 'primary', className = '', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant }) {
+  return <button type="button" className={buttonClass(variant, className)} {...rest} />;
 }
 
 export function IconButton({ label, children, className = '', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string }) {

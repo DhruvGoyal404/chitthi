@@ -106,7 +106,7 @@ describe.skipIf(!apiUrl)('REST API (sends, edits, deletes, sync reads)', () => {
 
   it('serves /me, profile edits, handle search, conversation detail and inbox previews', async () => {
     const { a, b, id } = await dm();
-    expect((await as(app, a).get('/me')).body.user).toEqual({ id: a.id, handle: a.handle, displayName: a.handle });
+    expect((await as(app, a).get('/me')).body.user).toEqual({ id: a.id, handle: a.handle, displayName: a.handle, avatarUrl: null });
     const renamed = await as(app, a).patch('/me', { displayName: '  Asha Rao  ' });
     expect(renamed.body.user.displayName).toBe('Asha Rao');
     expect((await as(app, a).patch('/me', { handle: 'Support' })).body.error.code).toBe('handle_reserved');

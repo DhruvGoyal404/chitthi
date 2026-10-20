@@ -35,10 +35,13 @@ npm run dev:api             # http://127.0.0.1:8082/api/health
 npm run dev:web             # http://localhost:5175
 ```
 
+To sign in with Google or GitHub, set the client id and secret pairs (in `.env` or `api/.env`) and register `http://localhost:5175/api/auth/{google,github}/callback` as redirect URIs. Without them, development uses the `DEV_LOGIN` handle shortcut. See [docs/AUTH.md](docs/AUTH.md).
+
 ## Docs
 
 - [docs/AUDIT.md](docs/AUDIT.md): audit of the legacy codebase and the plan for this rewrite.
 - [docs/SCHEMA.md](docs/SCHEMA.md): the data model and what the database enforces.
+- [docs/AUTH.md](docs/AUTH.md): Google and GitHub sign-in, onboarding, linking and sessions.
 - [docs/REALTIME.md](docs/REALTIME.md): real-time delivery, the guarantees, failure modes and the client sync contract.
 - [CLAUDE.md](CLAUDE.md): invariants, phases and working rules.
 

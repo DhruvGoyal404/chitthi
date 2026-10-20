@@ -33,7 +33,7 @@ export function createApp({ config, logger, pool, rateLimits = createRateLimits(
   api.use(healthRouter(pool));
   // Per client IP on everything that starts or completes a sign-in. The read-only listings are
   // exempt: the sign-in and account pages fetch them on every visit.
-  api.use(['/auth', '/dev/login'], limitBy(rateLimits.auth, (req) =>
+  api.use(['/auth', '/dev/login', '/dev/pending-signup'], limitBy(rateLimits.auth, (req) =>
     req.method === 'GET' && (req.path === '/providers' || req.path === '/identities') ? undefined : (req.ip ?? 'unknown'),
   ));
   api.use(oauthRouter(pool, sessions, config, logger));

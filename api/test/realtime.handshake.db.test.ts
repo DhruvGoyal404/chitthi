@@ -1,6 +1,8 @@
+import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { as, signIn } from './apphelpers.js';
 import { adminPool, appPool } from './dbhelpers.js';
+import { WEB_ORIGIN } from './helpers.js';
 import { connect, connected, disconnected, socketFor, startTestServer, type TestServer } from './sockets.js';
 
 const apiUrl = inject('apiDbUrl');
@@ -47,6 +49,26 @@ describe.skipIf(!apiUrl)('socket handshake and session lifetime', () => {
     expect((await as(server.url, u).post('/dev/logout')).status).toBe(204);
     expect(await gone).toEqual(['io server disconnect', 'io server disconnect']);
     await expect(connected(socketFor(server, u))).rejects.toThrow(/unauthenticated/);
+  });
+
+  it('the real sign-out routes disconnect too: logout this session only, logout-all every session', async () => {
+    const u = await signIn(server.url);
+    const anotherSession = async () => {
+      const res = await request(server.url).post('/api/dev/login').set('Origin', WEB_ORIGIN).send({ handle: u.handle });
+      return { ...u, cookie: (res.headers['set-cookie'] as unknown as string[])[0]?.split(';')[0] ?? '' };
+    };
+    const v = await anotherSession();
+    const w = await anotherSession();
+    const [su, sv, sw] = await Promise.all([connect(server, u), connect(server, v), connect(server, w)]);
+
+    const first = disconnected(su);
+    expect((await as(server.url, u).post('/auth/logout')).status).toBe(204);
+    expect(await first).toBe('io server disconnect');
+    expect(sv.connected && sw.connected).toBe(true);
+
+    const rest = Promise.all([disconnected(sv), disconnected(sw)]);
+    expect((await as(server.url, v).post('/auth/logout-all')).body).toEqual({ revoked: 2 });
+    expect(await rest).toEqual(['io server disconnect', 'io server disconnect']);
   });
 
   it('disconnects a user who is disabled', async () => {

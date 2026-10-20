@@ -1,12 +1,20 @@
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
 import { devLoginAllowed } from './config.js';
+import { sha256 } from './oauth/flows.js';
+import { AUTH_COOKIE_PATH, SIGNUP_COOKIE } from './oauth/router.js';
 import { findOrCreateDevUser } from './repo/users.js';
 import { SESSION_COOKIE, sessionToken, startSession, type SessionStore } from './sessions.js';
 
 const loginBody = z.object({
   handle: z.string().trim().regex(/^[A-Za-z0-9_]{3,20}$/, '3–20 characters: letters, digits or _'),
+});
+
+const pendingBody = z.object({
+  displayName: z.string().trim().min(1).max(60),
+  email: z.email().optional(),
 });
 
 /**
@@ -26,6 +34,20 @@ export function devLoginRouter(nodeEnv: string, pool: pg.Pool, store: SessionSto
     const user = await findOrCreateDevUser(pool, handle);
     await startSession(store, req, res, user.id, false); // dev and test only: never served over HTTPS
     res.status(201).json({ user: { id: user.id, handle: user.handle } });
+  });
+
+  // Stands in for a provider's callback: a pending first sign-in (as if from GitHub, with a
+  // made-up subject), so the welcome page can be exercised in e2e tests without a real provider.
+  router.post('/dev/pending-signup', async (req, res) => {
+    const { displayName, email } = pendingBody.parse(req.body);
+    const token = randomBytes(32).toString('base64url');
+    await pool.query(
+      `INSERT INTO pending_signups (token_hash, provider, subject, email, display_name)
+       VALUES ($1, 'github', $2, $3, $4)`,
+      [sha256(token), `dev-${randomUUID()}`, email ?? `${randomUUID()}@dev.invalid`, displayName],
+    );
+    res.cookie(SIGNUP_COOKIE, token, { httpOnly: true, sameSite: 'lax', path: AUTH_COOKIE_PATH, maxAge: 30 * 60 * 1000 });
+    res.status(201).json({ ok: true });
   });
 
   router.post('/dev/logout', async (req, res) => {

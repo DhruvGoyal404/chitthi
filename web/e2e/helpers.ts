@@ -25,3 +25,17 @@ export async function openDm(page: Page, other: string): Promise<string> {
   await page.waitForURL(/\/c\/[0-9a-f-]{36}$/);
   return page.url().split('/c/')[1] ?? '';
 }
+
+/**
+ * A first sign-in waiting at the welcome page, through the API's dev-only stand-in for a
+ * provider callback (the browser's own fetch, so it carries the Origin header and gets the cookie).
+ */
+export async function pendingSignup(page: Page, displayName: string): Promise<void> {
+  await page.goto('/signin');
+  const status = await page.evaluate(async (name) => {
+    const res = await fetch('/api/dev/pending-signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ displayName: name }) });
+    return res.status;
+  }, displayName);
+  expect(status).toBe(201);
+  await page.goto('/welcome');
+}

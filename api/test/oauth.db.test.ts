@@ -9,7 +9,7 @@ import { FLOW_COOKIE, SIGNUP_COOKIE } from '../src/oauth/router.js';
 import { SESSION_COOKIE } from '../src/sessions.js';
 import { GENEROUS, signIn } from './apphelpers.js';
 import { appPool } from './dbhelpers.js';
-import { captureLogger, testConfig, UNREACHABLE_DB_URL } from './helpers.js';
+import { captureLogger, testConfig, UNREACHABLE_DB_URL, WEB_ORIGIN } from './helpers.js';
 import { mockGithub, mockGoogle } from './mockProviders.js';
 
 const apiUrl = inject('apiDbUrl');
@@ -203,5 +203,84 @@ describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => 
     const res = await callback('google', { state: f.state, code: 'abc' }, { ...f.cookies, [SESSION_COOKIE]: third.cookie.split('=')[1] ?? '' });
     expect(res.headers.location).toBe('/account?error=link_session_changed&provider=google');
     expect((await request(app).get('/api/auth/google/link')).status).toBe(401);
+  });
+
+  describe('first sign-in onboarding', () => {
+    /** A Google first sign-in up to the welcome page; returns the signup cookie. */
+    async function pending() {
+      fresh();
+      const { state, cookies } = await start('google');
+      const res = await callback('google', { state, code: 'abc' }, cookies);
+      return { [SIGNUP_COOKIE]: cookiesOf(res)[SIGNUP_COOKIE] ?? '' };
+    }
+    const finish = (cookies: Cookies, body: object) =>
+      request(app).post('/api/auth/onboarding').set('Origin', WEB_ORIGIN).set('Cookie', cookieHeader(cookies)).send(body);
+
+    it('prefills from the provider, then creates the account, its identity and a session in one go', async () => {
+      const signup = await pending();
+      const info = await request(app).get('/api/auth/onboarding').set('Cookie', cookieHeader(signup));
+      expect(info.status).toBe(200);
+      expect(info.body).toMatchObject({ provider: 'google', email: google.state.email, displayName: 'Asha Rao', avatarUrl: 'https://lh3.example.com/a.png' });
+      expect(info.body.suggestedHandle).toMatch(/^g_[0-9a-f]{8}$/); // the email's local part, free and not reserved
+
+      // A reserved or taken handle is refused and the signup stays usable.
+      expect((await finish(signup, { handle: 'Admin', displayName: 'Asha' })).body.error.code).toBe('handle_reserved');
+      const taken = await signIn(app, 'tkn');
+      expect((await finish(signup, { handle: taken.handle.toUpperCase(), displayName: 'Asha' })).body.error.code).toBe('handle_taken');
+      expect((await finish(signup, { handle: 'x', displayName: 'Asha' })).status).toBe(400);
+
+      const handle = `asha_${randomBytes(3).toString('hex')}`;
+      const done = await finish({ ...signup, [SESSION_COOKIE]: 'planted-token' }, { handle, displayName: ' Asha R ' });
+      expect(done.status).toBe(201);
+      expect(done.body.user).toMatchObject({ handle, displayName: 'Asha R', avatarUrl: 'https://lh3.example.com/a.png' });
+      const session = cookiesOf(done)[SESSION_COOKIE];
+      expect(session).toMatch(/^[\w-]{43}$/);
+      expect(cookiesOf(done)[SIGNUP_COOKIE]).toBe(''); // cleared
+      const me = await request(app).get('/api/me').set('Cookie', `${SESSION_COOKIE}=${session ?? ''}`);
+      expect(me.body.user).toMatchObject({ id: done.body.user.id, handle, avatarUrl: 'https://lh3.example.com/a.png' });
+
+      // Single use; and the next Google sign-in is a plain sign-in to this account.
+      expect((await finish(signup, { handle: `${handle}2`, displayName: 'Asha' })).body.error.code).toBe('signup_expired');
+      expect((await request(app).get('/api/auth/onboarding').set('Cookie', cookieHeader(signup))).status).toBe(404);
+      const again = await start('google');
+      const back = await callback('google', { state: again.state, code: 'abc' }, again.cookies);
+      expect(back.headers.location).toBe('/c/x');
+      expect((await request(app).get('/api/me').set('Cookie', `${SESSION_COOKIE}=${cookiesOf(back)[SESSION_COOKIE] ?? ''}`)).body.user.id).toBe(done.body.user.id);
+    });
+
+    it('needs a live signup, and re-checks the email when the account is created', async () => {
+      expect((await request(app).get('/api/auth/onboarding')).body.error.code).toBe('signup_expired');
+      expect((await finish({}, { handle: 'nobody_here', displayName: 'N' })).body.error.code).toBe('signup_expired');
+
+      const signup = await pending();
+      const other = await signIn(app, 'eml');
+      await pool.query("INSERT INTO identities (user_id, provider, subject, email, email_verified) VALUES ($1, 'github', $2, $3, true)", [other.id, String(Date.now()), google.state.email]);
+      const res = await finish(signup, { handle: `late_${randomBytes(3).toString('hex')}`, displayName: 'Late' });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('account_exists');
+    });
+  });
+
+  describe('signing out', () => {
+    it('logout revokes this session only; logout-all revokes every session of the user', async () => {
+      const a = await signIn(app, 'out');
+      const second = await request(app).post('/api/dev/login').set('Origin', WEB_ORIGIN).send({ handle: a.handle });
+      const b = `${SESSION_COOKIE}=${cookiesOf(second)[SESSION_COOKIE] ?? ''}`;
+      const third = await request(app).post('/api/dev/login').set('Origin', WEB_ORIGIN).send({ handle: a.handle });
+      const c = `${SESSION_COOKIE}=${cookiesOf(third)[SESSION_COOKIE] ?? ''}`;
+
+      expect((await request(app).post('/api/auth/logout').set('Cookie', a.cookie)).status).toBe(403); // Origin check
+      const out = await request(app).post('/api/auth/logout').set('Origin', WEB_ORIGIN).set('Cookie', a.cookie);
+      expect(out.status).toBe(204);
+      expect(cookiesOf(out)[SESSION_COOKIE]).toBe('');
+      expect((await request(app).get('/api/me').set('Cookie', a.cookie)).status).toBe(401);
+      expect((await request(app).get('/api/me').set('Cookie', b)).status).toBe(200);
+
+      const all = await request(app).post('/api/auth/logout-all').set('Origin', WEB_ORIGIN).set('Cookie', b);
+      expect(all.body).toEqual({ revoked: 2 });
+      expect((await request(app).get('/api/me').set('Cookie', b)).status).toBe(401);
+      expect((await request(app).get('/api/me').set('Cookie', c)).status).toBe(401);
+      expect((await request(app).post('/api/auth/logout-all').set('Origin', WEB_ORIGIN).set('Cookie', c)).status).toBe(401);
+    });
   });
 });

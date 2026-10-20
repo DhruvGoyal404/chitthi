@@ -3,6 +3,11 @@ export type { Message, MessageEvent } from '../sync/sync.js';
 
 export type Role = 'owner' | 'admin' | 'member';
 export type User = { id: string; handle: string; displayName: string };
+/** The signed-in user's own profile (/api/me). */
+export type Me = User & { avatarUrl: string | null };
+export type Provider = 'google' | 'github';
+export type Providers = Record<Provider | 'dev', boolean>;
+export type Identity = { provider: Provider; email: string | null; linkedAt: string };
 
 export type InboxEntry = {
   id: string;

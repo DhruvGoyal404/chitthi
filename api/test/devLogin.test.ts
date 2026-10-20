@@ -63,7 +63,7 @@ describe.skipIf(!url)('dev login and Postgres sessions', () => {
 
     const me = await request(app).get('/api/me').set('Cookie', pair(cookie));
     expect(me.status).toBe(200);
-    expect(me.body.user).toEqual({ ...res.body.user, displayName: handle });
+    expect(me.body.user).toEqual({ ...res.body.user, displayName: handle, avatarUrl: null });
 
     // Same handle in any case → same user (the dev identity is keyed by lower(handle)).
     const again = await login(app, handle.toUpperCase());
@@ -157,6 +157,7 @@ describe.skipIf(!url)('dev login and Postgres sessions', () => {
   it('is not mounted unless enabled', async () => {
     const app = setup({ devLogin: false });
     expect((await login(app, uniqueHandle())).status).toBe(404);
+    expect((await request(app).post('/api/dev/pending-signup').set('Origin', WEB_ORIGIN).send({ displayName: 'X' })).status).toBe(404);
     expect((await request(app).get('/api/me')).status).toBe(401);
   });
 

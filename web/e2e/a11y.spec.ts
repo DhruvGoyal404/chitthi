@@ -1,6 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
-import { openDm, signedIn } from './helpers.js';
+import { handle, openDm, pendingSignup, signedIn } from './helpers.js';
 
 const WCAG_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
 
@@ -17,6 +17,19 @@ for (const scheme of ['light', 'dark'] as const) {
     await page.goto('/signin');
     await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
     await expectAccessible(page, 'sign in');
+    await page.goto('/signin?error=account_exists&provider=github');
+    await expect(page.getByRole('alert')).toBeVisible();
+    await expectAccessible(page, 'sign in with an error');
+
+    // First sign-in (welcome), with a field error showing.
+    await pendingSignup(page, 'Asha Rao');
+    await page.getByLabel('Pick a handle').fill('admin');
+    await page.getByRole('button', { name: 'Create account' }).click();
+    await expect(page.getByText('That handle is reserved')).toBeVisible();
+    await expectAccessible(page, 'welcome');
+    await page.getByLabel('Pick a handle').fill(handle('axW'));
+    await page.getByRole('button', { name: 'Create account' }).click();
+    await expect(page.getByRole('navigation', { name: 'Conversations' })).toBeVisible();
 
     const a = await signedIn(browser, 'axA', { colorScheme: scheme });
     const b = await signedIn(browser, 'axB', { colorScheme: scheme });
@@ -75,6 +88,10 @@ for (const scheme of ['light', 'dark'] as const) {
     await a.page.goto('/settings');
     await expect(a.page.getByLabel('Display name')).toBeVisible();
     await expectAccessible(a.page, 'settings');
+
+    await a.page.goto('/account?error=identity_in_use&provider=google');
+    await expect(a.page.getByRole('heading', { name: 'Sign-in methods' })).toBeVisible();
+    await expectAccessible(a.page, 'account');
 
     await a.context.close();
     await b.context.close();

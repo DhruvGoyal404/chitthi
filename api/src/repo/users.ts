@@ -5,6 +5,9 @@ import { isUniqueViolation, violates, withTx } from './pg.js';
 export type User = { id: string; handle: string; displayName: string };
 
 const USER_COLUMNS = 'u.id, u.handle, u.display_name AS "displayName"';
+/** The signed-in user's own view of themselves. */
+export type Me = User & { avatarUrl: string | null };
+const ME_COLUMNS = `${USER_COLUMNS}, u.avatar_url AS "avatarUrl"`;
 
 /**
  * The dev sign-in's user: identity ('dev', lower(handle)) → user, created on first use with the
@@ -58,17 +61,17 @@ export async function findUserByHandle(pool: pg.Pool, handle: string): Promise<U
   return user;
 }
 
-export async function getUser(pool: pg.Pool, id: string): Promise<User | undefined> {
-  const { rows: [user] } = await pool.query<User>(`SELECT ${USER_COLUMNS} FROM users u WHERE u.id = $1 AND u.disabled_at IS NULL`, [id]);
+export async function getUser(pool: pg.Pool, id: string): Promise<Me | undefined> {
+  const { rows: [user] } = await pool.query<Me>(`SELECT ${ME_COLUMNS} FROM users u WHERE u.id = $1 AND u.disabled_at IS NULL`, [id]);
   return user;
 }
 
 /** Changes the caller's handle and/or display name; handle rules are enforced by the database. */
-export async function updateProfile(pool: pg.Pool, id: string, patch: { handle?: string; displayName?: string }): Promise<User> {
+export async function updateProfile(pool: pg.Pool, id: string, patch: { handle?: string; displayName?: string }): Promise<Me> {
   try {
-    const { rows: [user] } = await pool.query<User>(
+    const { rows: [user] } = await pool.query<Me>(
       `UPDATE users u SET handle = COALESCE($2, u.handle), display_name = COALESCE($3, u.display_name)
-        WHERE u.id = $1 AND u.disabled_at IS NULL RETURNING ${USER_COLUMNS}`,
+        WHERE u.id = $1 AND u.disabled_at IS NULL RETURNING ${ME_COLUMNS}`,
       [id, patch.handle ?? null, patch.displayName?.trim() ?? null],
     );
     if (!user) throw new HttpError(404, 'user_not_found', 'User not found');

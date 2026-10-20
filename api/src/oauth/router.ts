@@ -2,12 +2,14 @@ import { parseCookie } from 'cookie';
 import { Router, type Response } from 'express';
 import type pg from 'pg';
 import type { Logger } from 'pino';
+import { z } from 'zod';
 import { requireSession, sessionOf } from '../auth.js';
 import type { Config } from '../config.js';
 import { HttpError } from '../errors.js';
-import { sessionToken, startSession, type SessionStore } from '../sessions.js';
+import { SESSION_COOKIE, sessionToken, startSession, type SessionStore } from '../sessions.js';
 import { identitiesOf, linkIdentity, signInWith } from './accounts.js';
 import { consumeFlow, isProvider, OAuthError, safeReturnTo, startFlow, type Flow, type Profile, type Provider } from './flows.js';
+import { completeSignup, pendingSignup } from './onboarding.js';
 import { githubAuthorizeUrl, githubProfile } from './github.js';
 import { googleAuthorizeUrl, googleProfile } from './google.js';
 
@@ -16,6 +18,11 @@ export const FLOW_COOKIE = 'chitthi_oauth';
 /** A first sign-in waiting for onboarding (the token of a pending_signups row). */
 export const SIGNUP_COOKIE = 'chitthi_signup';
 export const AUTH_COOKIE_PATH = '/api/auth';
+
+const signupBody = z.object({
+  handle: z.string().trim().regex(/^[A-Za-z0-9_]{3,20}$/, '3–20 characters: letters, digits or _'),
+  displayName: z.string().trim().min(1).max(60),
+});
 
 const notFound = () => new HttpError(404, 'not_found', 'Not found');
 
@@ -123,6 +130,34 @@ export function oauthRouter(pool: pg.Pool, sessions: SessionStore, config: Confi
     // Rotation: any session this browser had is revoked before the new one is issued.
     await startSession(sessions, req, res, result.userId, secure);
     res.redirect(302, flow.returnTo);
+  });
+
+  // First sign-in: the welcome page shows the provider's profile and a suggested handle…
+  router.get('/auth/onboarding', async (req, res) => {
+    res.json(await pendingSignup(pool, parseCookie(req.get('cookie') ?? '')[SIGNUP_COOKIE]));
+  });
+
+  // …and creating the account signs it in (a fresh session; any previous one is revoked).
+  router.post('/auth/onboarding', async (req, res) => {
+    const input = signupBody.parse(req.body);
+    const user = await completeSignup(pool, parseCookie(req.get('cookie') ?? '')[SIGNUP_COOKIE], input);
+    res.clearCookie(SIGNUP_COOKIE, { path: AUTH_COOKIE_PATH });
+    await startSession(sessions, req, res, user.id, secure);
+    res.status(201).json({ user });
+  });
+
+  // Revoking a session also disconnects its sockets (the sessions trigger notifies the realtime server).
+  router.post('/auth/logout', async (req, res) => {
+    const token = sessionToken(req);
+    if (token) await sessions.revoke(token);
+    res.clearCookie(SESSION_COOKIE, { path: '/' });
+    res.status(204).end();
+  });
+
+  router.post('/auth/logout-all', requireSession(sessions), async (_req, res) => {
+    const revoked = await sessions.revokeAll(sessionOf(res).user.id);
+    res.clearCookie(SESSION_COOKIE, { path: '/' });
+    res.json({ revoked });
   });
 
   router.get('/auth/identities', requireSession(sessions), async (_req, res) => {
