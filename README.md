@@ -6,6 +6,17 @@ A real-time chat app: 1:1 and group conversations, durable ordered history, read
 
 **Not end-to-end encrypted.** Messages are stored in plaintext on the server, which can read them. There are no voice or video calls.
 
+## Screens
+
+The look is the old blue inland letter: pale blue paper, letters with a folded corner (yours on cream airmail paper), postage-stamp avatars, and a postmark for "read".
+
+| Phone (390 px) | Desktop |
+|---|---|
+| <img src="docs/img/chat-390.png" width="260" alt="A conversation on a phone"> | <img src="docs/img/group-desktop.png" width="520" alt="Inbox and a group conversation on desktop"> |
+| <img src="docs/img/inbox-390-dark.png" width="260" alt="The inbox in dark mode"> | <img src="docs/img/message-info-desktop-dark.png" width="520" alt="Who read a group message, in dark mode"> |
+
+Every screen, at 390 px and on desktop, in light and dark: [docs/img/](docs/img/). Regenerate them with `SCREENSHOTS=1 npm run e2e -w web -- e2e/screenshots.spec.ts --project=desktop`.
+
 ## Stack
 
 Node 22 · TypeScript · Express 5 · PostgreSQL 18 · Socket.IO · React 19 · Vite · Tailwind CSS v4 · TanStack Query
