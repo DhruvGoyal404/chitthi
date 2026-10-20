@@ -1,61 +1,91 @@
-import { useEffect, useState, type SubmitEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
-import { Avatar, Button, Icon, TopBar } from '../components/ui.js';
-import { api } from '../lib/api.js';
-import { clock, lastSeenPhrase } from '../lib/format.js';
+import { Composer } from '../chat/Composer.js';
+import { MessageList, type MessageListHandle } from '../chat/MessageList.js';
+import { timeline } from '../chat/outbox.js';
+import { Icon, TopBar } from '../components/ui.js';
+import { lastSeenPhrase } from '../lib/format.js';
 import type { Message } from '../lib/types.js';
-import { uuidv7 } from '../lib/uuid.js';
-import { useMessages, usePresence, useRealtime } from '../realtime/hooks.js';
+import { useHasOlder, useMessages, usePending, usePresence, useRealtime, useTyping } from '../realtime/hooks.js';
 import { namer, systemText, useConversation } from '../queries.js';
 import { useMe } from '../session.js';
 import { BackLink } from './Shell.js';
 
-/** Basic chat view (the full one — virtualized, optimistic, ticks — replaces this in the chat piece). */
 export function Chat() {
   const { id = '' } = useParams();
+  // A fresh view per conversation: divider, anchoring and edit state all reset.
+  return <ChatView key={id} id={id} />;
+}
+
+function ChatView({ id }: { id: string }) {
   const me = useMe();
+  const meId = me.data?.id ?? '';
   const rt = useRealtime();
   const conv = useConversation(id);
-  const messages = useMessages(id);
-  const peer = conv.data?.kind === 'direct' ? conv.data.members.find((m) => m.userId !== me.data?.id) : undefined;
+  const stored = useMessages(id);
+  const pending = usePending(id);
+  const hasOlder = useHasOlder(id);
+  const typing = useTyping(id);
+  const [loaded, setLoaded] = useState(false);
+  const [editing, setEditing] = useState<Message | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const list = useRef<MessageListHandle>(null);
+
+  useEffect(() => {
+    void rt.engine.loadLatest(id).then(() => { setLoaded(true); });
+  }, [rt, id]);
+
+  const c = conv.data;
+  const mine = c?.members.find((m) => m.userId === meId);
+  const peer = c?.kind === 'direct' ? c.members.find((m) => m.userId !== meId) : undefined;
   const presence = usePresence(peer?.userId);
-  const [draft, setDraft] = useState('');
+  // The divider sits at my read marker as it was when I opened the conversation.
+  const [initialReadSeq, setInitialReadSeq] = useState<number | null>(null);
+  if (initialReadSeq === null && mine) setInitialReadSeq(mine.lastReadSeq);
 
-  useEffect(() => { void rt.engine.loadLatest(id); }, [rt, id]);
+  const nameOf = useMemo(() => namer(c?.members, meId), [c?.members, meId]);
+  const items = useMemo(() => timeline(stored, pending, meId), [stored, pending, meId]);
+  const name = c?.kind === 'group' ? (c.title ?? 'Group') : (peer?.displayName ?? '…');
+  const typingNames = typing.filter((u) => u !== meId).map((u) => nameOf(u));
+  const subtitle = typingNames.length > 0
+    ? (c?.kind === 'group' ? `${typingNames.join(', ')} ${typingNames.length > 1 ? 'are' : 'is'} typing…` : 'typing…')
+    : c?.kind === 'group' ? `${String(c.members.filter((m) => m.active).length)} members` : lastSeenPhrase(presence);
 
-  const name = conv.data?.kind === 'group' ? (conv.data.title ?? 'Group') : (peer?.displayName ?? '…');
-  const nameOf = namer(conv.data?.members, me.data?.id);
-  const onSubmit = async (e: SubmitEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const body = draft;
-    setDraft('');
-    const { message } = await api<{ message: Message }>(`/conversations/${id}/messages`, { method: 'POST', body: { clientMsgId: uuidv7(), body } });
-    await rt.ack(message);
+  const act = (p: Promise<void>) => {
+    setActionError(null);
+    p.catch(() => { setActionError('That did not go through. Check your connection and try again.'); });
   };
 
   return (
     <section className="flex h-full min-h-0 flex-col" aria-label={`Conversation with ${name}`}>
-      <TopBar title={name} subtitle={lastSeenPhrase(presence)} back={<BackLink />}
-        actions={<Link to={`/c/${id}/info`} aria-label="Conversation info" className="inline-flex h-11 w-11 items-center justify-center rounded-full hover:bg-paper-deep"><Icon.Info /></Link>} />
-      <ol className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {messages.map((m) => (
-          <li key={m.id} className={m.kind === 'system' ? 'text-center text-xs text-ink-soft' : m.senderId === me.data?.id ? 'flex justify-end' : 'flex'}>
-            {m.kind === 'system' ? systemText(m.meta, nameOf) : (
-              <div className={`letter max-w-[80%] rounded-sm px-3 py-2 shadow-sm ${m.senderId === me.data?.id ? 'mine' : ''}`}>
-                {conv.data?.kind === 'group' && m.senderId !== me.data?.id && <p className="text-xs font-semibold text-seal">{nameOf(m.senderId)}</p>}
-                <p className="whitespace-pre-wrap break-words text-ink">{m.body ?? <em className="text-ink-soft">message deleted</em>}</p>
-                <p className="text-right text-[0.7rem] text-ink-soft">{clock(m.createdAt)}</p>
-              </div>
-            )}
-          </li>
-        ))}
-      </ol>
-      <form onSubmit={(e) => { void onSubmit(e); }} className="flex gap-2 border-t border-paper-edge bg-paper-deep p-2">
-        <label htmlFor="composer" className="sr-only">Message</label>
-        <input id="composer" value={draft} onChange={(e) => { setDraft(e.target.value); }} className="min-h-11 flex-1 rounded-md border border-paper-edge bg-sheet px-3 text-ink" placeholder="Write a letter…" />
-        <Button type="submit" disabled={draft.trim() === ''} aria-label="Send"><Icon.Send /></Button>
-      </form>
-      <span hidden><Avatar name={name} /></span>
+      <TopBar title={name}
+        subtitle={<span aria-live="polite">{subtitle}</span>}
+        back={<BackLink />}
+        actions={
+          <Link to={`/c/${id}/info`} aria-label="Conversation info" title="Conversation info"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-full hover:bg-paper-deep"><Icon.Info /></Link>
+        } />
+      {actionError && <p role="alert" className="bg-paper-deep px-4 py-2 text-sm text-stamp">{actionError}</p>}
+      {loaded && c && mine && initialReadSeq !== null ? (
+        <MessageList ref={list} conversationId={id} kind={c.kind} meId={meId} items={items} members={c.members}
+          initialReadSeq={initialReadSeq} myReadSeq={mine.lastReadSeq} hasOlder={hasOlder}
+          loadOlder={() => rt.engine.loadOlder(id)}
+          nameOf={nameOf} systemText={(m) => systemText(m.meta, nameOf)}
+          onMarkRead={(seq) => { void rt.markRead(id, seq); }}
+          onEdit={(m) => { setEditing(m); }}
+          onDelete={(m) => { act(rt.deleteForEveryone(id, m.id)); }}
+          onRetry={(p) => { void rt.retry(p.clientMsgId); }} />
+      ) : (
+        <p className="flex-1 p-6 text-center text-sm text-ink-soft">{conv.isError ? 'Could not open this conversation.' : 'Unfolding the letter…'}</p>
+      )}
+      <Composer key={editing?.id ?? 'new'}
+        disabled={!c?.myRole}
+        disabledReason={c && !c.myRole ? 'You left this group. You can read it, but not write.' : 'Loading…'}
+        editing={editing ? { body: editing.body ?? '' } : null}
+        onSend={(body) => { void rt.send(id, body); requestAnimationFrame(() => list.current?.scrollToBottom()); }}
+        onSaveEdit={(body) => { if (editing) act(rt.edit(id, editing.id, body)); setEditing(null); }}
+        onCancelEdit={() => { setEditing(null); }}
+        onTyping={(t) => { rt.sendTyping(id, t); }} />
     </section>
   );
 }

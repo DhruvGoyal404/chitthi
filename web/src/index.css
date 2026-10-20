@@ -81,10 +81,8 @@ body {
 
 /* The perforated tear-off edge of an inland letter. */
 .perforated {
-  background-image: radial-gradient(circle at 4px 0, transparent 2.5px, var(--paper-deep) 3px);
-  background-size: 10px 6px;
-  background-repeat: repeat-x;
-  height: 6px;
+  height: 0;
+  border-top: 2px dashed var(--paper-edge);
 }
 
 /* A letter with its top corner folded over: others' on the side of the sender, yours on the right. */

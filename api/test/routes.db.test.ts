@@ -136,6 +136,24 @@ describe.skipIf(!apiUrl)('REST API (sends, edits, deletes, sync reads)', () => {
     expect((await as(app, stranger).get(`/conversations/${id}`)).status).toBe(404);
   });
 
+  it('tells the sender who received and read a group message, and when', async () => {
+    const owner = await signIn(app, 'mi');
+    const [x, y] = [await signIn(app, 'mx'), await signIn(app, 'my')];
+    const gid = (await as(app, owner).post('/conversations', { title: 'Info', memberIds: [x.id, y.id] })).body.conversation.id as string;
+    const sent = (await as(app, owner).post(`/conversations/${gid}/messages`, { clientMsgId: randomUUID(), body: 'who read me?' })).body.message;
+    const path = `/conversations/${gid}/messages/${sent.id as string}/receipts`;
+    expect((await as(app, owner).get(path)).body.receipts.map((r: { deliveredAt: unknown; readAt: unknown }) => [r.deliveredAt, r.readAt]))
+      .toEqual([[null, null], [null, null]]);
+    await pool.query('SELECT pg_sleep(0.02)');
+    await as(app, x).post(`/conversations/${gid}/read`, { seq: sent.seq as number });
+    const receipts = (await as(app, owner).get(path)).body.receipts as { userId: string; deliveredAt: string | null; readAt: string | null }[];
+    const forX = receipts.find((r) => r.userId === x.id);
+    expect(forX?.readAt).toEqual(expect.any(String));
+    expect(forX?.deliveredAt).toBe(forX?.readAt); // reading implies delivery, at the same moment
+    expect(receipts.find((r) => r.userId === y.id)).toMatchObject({ deliveredAt: null, readAt: null });
+    expect((await as(app, x).get(path)).status).toBe(403); // only the sender
+  });
+
   it('rate-limits sends per user', async () => {
     const limited = testApp(pool, apiUrl, { auth: { points: 100, duration: 60 }, send: { points: 2, duration: 60 }, socket: { points: 100, duration: 60 }, search: { points: 100, duration: 60 } });
     const a = await signIn(limited, 'rl');

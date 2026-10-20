@@ -257,3 +257,35 @@ function reviveDates(m: Message): Message {
   const d = (v: Date | string | null) => (v === null ? null : new Date(v));
   return { ...m, createdAt: new Date(m.createdAt), editedAt: d(m.editedAt), deletedAt: d(m.deletedAt) };
 }
+
+export type Receipt = { userId: string; handle: string; displayName: string; deliveredAt: Date | null; readAt: Date | null };
+
+/**
+ * Who received and read one of your messages, and when (the group "message info" panel). Only the
+ * sender may ask. Recipients are everyone else whose membership window contains the message's seq;
+ * times come from marker_events (the first move of each marker past the seq).
+ */
+export async function messageReceipts(pool: pg.Pool, input: { conversationId: string; messageId: string; userId: string }): Promise<Receipt[]> {
+  assertUuid(input.conversationId, 'Conversation');
+  assertUuid(input.messageId, 'Message');
+  await requireReader(pool, input.conversationId, input.userId);
+  const { rows: [m] } = await pool.query<{ seq: number; sender_id: string | null }>(
+    'SELECT seq, sender_id FROM messages WHERE id = $1 AND conversation_id = $2', [input.messageId, input.conversationId],
+  );
+  if (!m) throw new HttpError(404, 'not_found', 'Message not found');
+  if (m.sender_id !== input.userId) throw new HttpError(403, 'forbidden', 'Only the sender can see who read a message');
+  const { rows } = await pool.query<Receipt>(
+    `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName",
+            (SELECT min(e.at) FROM marker_events e WHERE e.conversation_id = $1 AND e.user_id = u.id
+                AND e.kind = 'delivered' AND e.upto_seq >= $2) AS "deliveredAt",
+            (SELECT min(e.at) FROM marker_events e WHERE e.conversation_id = $1 AND e.user_id = u.id
+                AND e.kind = 'read' AND e.upto_seq >= $2) AS "readAt"
+       FROM users u
+      WHERE u.id <> $3 AND u.id IN (
+        SELECT p.user_id FROM conversation_memberships p
+         WHERE p.conversation_id = $1 AND p.joined_seq <= $2 AND (p.left_seq IS NULL OR p.left_seq >= $2))
+      ORDER BY lower(u.display_name)`,
+    [input.conversationId, m.seq, input.userId],
+  );
+  return rows;
+}

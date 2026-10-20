@@ -6,8 +6,8 @@ test('sign in, start a DM by handle search, exchange a letter, manage a group, e
   const b = await signedIn(browser, 'scrB');
 
   await openDm(a.page, b.handle);
-  await a.page.getByLabel('Message').fill('Namaste from A');
-  await a.page.getByLabel('Message').press('Enter');
+  await a.page.getByRole('textbox', { name: 'Message' }).fill('Namaste from A');
+  await a.page.getByRole('textbox', { name: 'Message' }).press('Enter');
   await expect(a.page.getByRole('main').getByText('Namaste from A')).toBeVisible();
 
   // B sees it in the inbox (preview + unread badge) and in the chat.

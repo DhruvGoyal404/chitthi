@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router';
 import { Chat } from './screens/Chat.js';
 import { ConversationInfo } from './screens/ConversationInfo.js';
+import { MessageInfo } from './screens/MessageInfo.js';
 import { NewChat } from './screens/NewChat.js';
 import { NewGroup } from './screens/NewGroup.js';
 import { Settings } from './screens/Settings.js';
@@ -22,6 +23,7 @@ export function App() {
         <Route index element={null} />
         <Route path="c/:id" element={<Chat />} />
         <Route path="c/:id/info" element={<ConversationInfo />} />
+        <Route path="c/:id/m/:messageId" element={<MessageInfo />} />
         <Route path="new" element={<NewChat />} />
         <Route path="new/group" element={<NewGroup />} />
         <Route path="settings" element={<Settings />} />

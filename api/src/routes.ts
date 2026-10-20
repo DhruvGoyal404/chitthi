@@ -8,7 +8,7 @@ import {
   addMember, createGroup, findOrCreateDirect, getConversation, leave, listConversations, removeMember,
 } from './repo/conversations.js';
 import {
-  catchUpByChange, catchUpBySeq, deleteForEveryone, editMessage, history, markRead, MAX_PAGE, sendMessage,
+  catchUpByChange, catchUpBySeq, deleteForEveryone, editMessage, history, markRead, MAX_PAGE, messageReceipts, sendMessage,
 } from './repo/messages.js';
 import { findUserByHandle, searchUsers } from './repo/users.js';
 import type { SessionStore } from './sessions.js';
@@ -128,6 +128,12 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
     const conversationId = pathId(req.params.id, 'Conversation');
     const messageId = pathId(req.params.messageId, 'Message');
     res.json({ message: await deleteForEveryone(pool, { conversationId, messageId, userId: me(res) }) });
+  });
+
+  r.get('/conversations/:id/messages/:messageId/receipts', async (req, res) => {
+    const conversationId = pathId(req.params.id, 'Conversation');
+    const messageId = pathId(req.params.messageId, 'Message');
+    res.json({ receipts: await messageReceipts(pool, { conversationId, messageId, userId: me(res) }) });
   });
 
   r.post('/conversations/:id/read', async (req, res) => {

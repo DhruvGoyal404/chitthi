@@ -1,7 +1,9 @@
 import type { QueryClient } from '@tanstack/react-query';
 import { io, type Socket } from 'socket.io-client';
-import { api } from '../lib/api.js';
+import { Outbox } from '../chat/outbox.js';
+import { api, ApiError } from '../lib/api.js';
 import type { ConversationDetail, InboxEntry, Message, PresenceEvent, ReceiptEvent, TypingEvent } from '../lib/types.js';
+import { uuidv7 } from '../lib/uuid.js';
 import { SyncEngine, type ChangePage, type ConversationHead, type Page, type SyncApi } from '../sync/sync.js';
 
 export type ConnectionState = 'connecting' | 'live' | 'reconnecting' | 'offline';
@@ -53,6 +55,8 @@ export class RealtimeClient {
   readonly connection = new Store<ConnectionState>('connecting');
   readonly presence = new Store<ReadonlyMap<string, PresenceEvent>>(new Map());
   readonly typing = new Store<TypingMap>(new Map());
+  readonly outbox = new Outbox();
+  private readonly readSent = new Map<string, number>();
   private inboxTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly onOffline = () => { this.connection.set('offline'); this.socket.disconnect(); };
   private readonly onOnline = () => { this.connection.set('reconnecting'); this.socket.connect(); };
@@ -108,12 +112,58 @@ export class RealtimeClient {
     return this.engine.ingestAck(message);
   }
 
+  /** Optimistic send: shown at once as pending; the stored row replaces it when acknowledged. */
+  send(conversationId: string, body: string): Promise<void> {
+    const p = this.outbox.add({ clientMsgId: uuidv7(), conversationId, body, createdAt: new Date().toISOString() });
+    return this.deliver(p.clientMsgId, conversationId, body);
+  }
+
+  /** Retries a failed send with the SAME client message id: the server stores it at most once. */
+  retry(clientMsgId: string): Promise<void> {
+    const p = this.outbox.retry(clientMsgId);
+    return p ? this.deliver(p.clientMsgId, p.conversationId, p.body) : Promise.resolve();
+  }
+
+  private async deliver(clientMsgId: string, conversationId: string, body: string): Promise<void> {
+    try {
+      const { message } = await api<{ message: Message }>(`/conversations/${conversationId}/messages`, { method: 'POST', body: { clientMsgId, body } });
+      await this.ack(message); // row first, then drop the pending bubble: no flicker
+      this.outbox.remove(clientMsgId);
+    } catch (e) {
+      // 4xx (other than timeouts and rate limits) won't succeed on retry: show the server's reason.
+      const permanent = e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
+      this.outbox.fail(clientMsgId, permanent ? e.message : undefined);
+    }
+  }
+
+  async edit(conversationId: string, messageId: string, body: string): Promise<void> {
+    const { message } = await api<{ message: Message }>(`/conversations/${conversationId}/messages/${messageId}`, { method: 'PATCH', body: { body } });
+    await this.ack(message);
+  }
+
+  async deleteForEveryone(conversationId: string, messageId: string): Promise<void> {
+    const { message } = await api<{ message: Message }>(`/conversations/${conversationId}/messages/${messageId}`, { method: 'DELETE' });
+    await this.ack(message);
+  }
+
+  /** Marks read up to seq (forward only; repeated calls for the same or lower seq are skipped). */
+  async markRead(conversationId: string, seq: number): Promise<void> {
+    if ((this.readSent.get(conversationId) ?? 0) >= seq) return;
+    this.readSent.set(conversationId, seq);
+    try {
+      await api(`/conversations/${conversationId}/read`, { method: 'POST', body: { seq } });
+    } catch {
+      this.readSent.delete(conversationId); // allow a retry on the next visibility change
+    }
+  }
+
   private refreshInbox(): void {
     clearTimeout(this.inboxTimer);
     this.inboxTimer = setTimeout(() => { void this.qc.invalidateQueries({ queryKey: ['conversations'] }); }, 250);
   }
 
   private onReceipt(e: ReceiptEvent, field: 'lastReadSeq' | 'lastDeliveredSeq'): void {
+    void this.qc.invalidateQueries({ queryKey: ['receipts', e.conversationId] });
     this.qc.setQueryData<ConversationDetail>(['conversation', e.conversationId], (c) => {
       if (!c) return c;
       return {
