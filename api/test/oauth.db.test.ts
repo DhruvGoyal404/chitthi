@@ -1,0 +1,207 @@
+import { randomBytes, randomUUID } from 'node:crypto';
+import type { Express } from 'express';
+import request from 'supertest';
+import { afterAll, beforeAll, describe, expect, it, inject } from 'vitest';
+import { createApp } from '../src/app.js';
+import { loadConfig, secretsOf } from '../src/config.js';
+import { createRateLimits } from '../src/limits.js';
+import { FLOW_COOKIE, SIGNUP_COOKIE } from '../src/oauth/router.js';
+import { SESSION_COOKIE } from '../src/sessions.js';
+import { GENEROUS, signIn } from './apphelpers.js';
+import { appPool } from './dbhelpers.js';
+import { captureLogger, testConfig, UNREACHABLE_DB_URL } from './helpers.js';
+import { mockGithub, mockGoogle } from './mockProviders.js';
+
+const apiUrl = inject('apiDbUrl');
+const GOOGLE_ID = 'google-client.apps.example';
+
+type Cookies = Record<string, string>;
+const cookiesOf = (res: request.Response): Cookies => {
+  const out: Cookies = {};
+  for (const c of (res.headers['set-cookie'] as unknown as string[] | undefined) ?? []) {
+    const [pair] = c.split(';');
+    const [k, ...v] = (pair ?? '').split('=');
+    if (k) out[k] = v.join('=');
+  }
+  return out;
+};
+const cookieHeader = (c: Cookies) => Object.entries(c).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('; ');
+
+describe('config for real sign-in', () => {
+  const base = { NODE_ENV: 'production', DATABASE_URL: UNREACHABLE_DB_URL };
+  it('refuses test endpoint overrides in production, half-configured providers, and a foreign PUBLIC_ORIGIN', () => {
+    expect(() => loadConfig({ ...base, GOOGLE_CLIENT_ID: 'x', GOOGLE_CLIENT_SECRET: 'y', GOOGLE_TOKEN_URL: 'http://evil.example/token' })).toThrow(/GOOGLE_TOKEN_URL/);
+    expect(() => loadConfig({ ...base, GITHUB_CLIENT_ID: 'x' })).toThrow(/GITHUB_CLIENT_SECRET/);
+    expect(() => loadConfig({ ...base, PUBLIC_ORIGIN: 'https://chitthi.example' })).toThrow(/PUBLIC_ORIGIN/);
+    const ok = loadConfig({ ...base, WEB_ORIGINS: 'https://chitthi.example', PUBLIC_ORIGIN: 'https://chitthi.example/', TRUST_PROXY: '1' });
+    expect(ok).toMatchObject({ publicOrigin: 'https://chitthi.example', trustProxy: true, google: undefined, github: undefined });
+  });
+  it('treats client secrets as secrets for log scrubbing', () => {
+    const c = loadConfig({ ...base, GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 'gsecret-123456', GITHUB_CLIENT_ID: 'id2', GITHUB_CLIENT_SECRET: 'hsecret-654321' });
+    expect(secretsOf(c)).toEqual(expect.arrayContaining(['gsecret-123456', 'hsecret-654321']));
+  });
+});
+
+describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => {
+  const pool = appPool(apiUrl);
+  let google: Awaited<ReturnType<typeof mockGoogle>>;
+  let github: Awaited<ReturnType<typeof mockGithub>>;
+  let app: Express;
+
+  beforeAll(async () => {
+    google = await mockGoogle(GOOGLE_ID);
+    github = await mockGithub();
+    const config = testConfig({
+      DATABASE_URL: apiUrl, DEV_LOGIN: 'true',
+      GOOGLE_CLIENT_ID: GOOGLE_ID, GOOGLE_CLIENT_SECRET: 'g-secret',
+      GOOGLE_ISSUER: google.url, GOOGLE_AUTH_URL: `${google.url}/auth`, GOOGLE_TOKEN_URL: `${google.url}/token`, GOOGLE_JWKS_URL: `${google.url}/jwks`,
+      GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: 'gh-secret',
+      GITHUB_AUTH_URL: `${github.url}/auth`, GITHUB_TOKEN_URL: `${github.url}/token`, GITHUB_API_URL: github.url,
+    });
+    const { logger } = captureLogger(config);
+    app = createApp({ config, logger, pool, rateLimits: createRateLimits(pool, logger, GENEROUS, `t${randomBytes(4).toString('hex')}:`) });
+  });
+  afterAll(async () => {
+    await Promise.all([google.close(), github.close(), pool.end()]);
+  });
+
+  /** Starts a flow like a browser would; returns the authorize URL and this browser's cookies. */
+  async function start(provider: 'google' | 'github', extra: Cookies = {}, path = 'start') {
+    const res = await request(app).get(`/api/auth/${provider}/${path}?next=/c/x`).set('Cookie', cookieHeader(extra));
+    expect(res.status).toBe(302);
+    const location = String(res.headers.location);
+    (provider === 'google' ? google : github).expectFlow(location);
+    const u = new URL(location);
+    return { location: u, state: u.searchParams.get('state') ?? '', cookies: { ...extra, ...cookiesOf(res) } };
+  }
+  const callback = (provider: string, query: Record<string, string>, cookies: Cookies) =>
+    request(app).get(`/api/auth/${provider}/callback?${new URLSearchParams(query).toString()}`).set('Cookie', cookieHeader(cookies));
+  const fresh = () => {
+    google.state.subject = randomUUID();
+    google.state.email = `g_${randomBytes(4).toString('hex')}@example.com`;
+    google.state.scenario = {};
+    github.state.id = Math.floor(Math.random() * 1e9);
+    github.state.email = `h_${randomBytes(4).toString('hex')}@example.com`;
+    github.state.scenario = {};
+  };
+
+  it('lists the configured providers', async () => {
+    expect((await request(app).get('/api/auth/providers')).body).toEqual({ google: true, github: true, dev: true });
+  });
+
+  it('Google: code + PKCE S256 + state + nonce; a new identity becomes a pending signup, not a user', async () => {
+    fresh();
+    const { location, state, cookies } = await start('google');
+    expect(location.origin + location.pathname).toBe(`${google.url}/auth`);
+    expect(Object.fromEntries(location.searchParams)).toMatchObject({
+      client_id: GOOGLE_ID, response_type: 'code', scope: 'openid email profile', code_challenge_method: 'S256',
+      redirect_uri: 'http://localhost:5175/api/auth/google/callback',
+    });
+    expect(location.searchParams.get('nonce')).toMatch(/^[\w-]{32}$/);
+    expect(cookies[FLOW_COOKIE]).toBe(state);
+
+    const res = await callback('google', { state, code: 'abc' }, cookies);
+    expect(google.state.lastVerifierOk).toBe(true); // the API sent the verifier matching its challenge
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('/welcome');
+    const signup = cookiesOf(res)[SIGNUP_COOKIE];
+    expect(signup).toMatch(/^[\w-]{43}$/);
+    expect(cookiesOf(res)[SESSION_COOKIE]).toBeUndefined();
+    const { rows } = await pool.query('SELECT 1 FROM identities WHERE provider = $1 AND subject = $2', ['google', google.state.subject]);
+    expect(rows).toHaveLength(0); // no account until onboarding
+  });
+
+  const rejectsGoogle = async (scenario: Parameters<typeof Object.assign>[1], code: string) => {
+    fresh();
+    google.state.scenario = scenario as never;
+    const { state, cookies } = await start('google');
+    const res = await callback('google', { state, code: 'abc' }, cookies);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`/signin?error=${code}&provider=google`);
+    expect(cookiesOf(res)[SESSION_COOKIE]).toBeUndefined();
+    expect(cookiesOf(res)[SIGNUP_COOKIE]).toBeUndefined();
+  };
+  it('Google: rejects a bad signature', () => rejectsGoogle({ foreignKey: true }, 'invalid_id_token'));
+  it('Google: rejects the wrong audience', () => rejectsGoogle({ claims: { aud: 'someone-else' } }, 'invalid_id_token'));
+  it('Google: rejects the wrong issuer', () => rejectsGoogle({ claims: { iss: 'https://evil.example' } }, 'invalid_id_token'));
+  it('Google: rejects an expired token', () => rejectsGoogle({ claims: { exp: Math.floor(Date.now() / 1000) - 120, iat: Math.floor(Date.now() / 1000) - 600 } }, 'invalid_id_token'));
+  it('Google: rejects a nonce mismatch', () => rejectsGoogle({ claims: { nonce: 'replayed-nonce' } }, 'invalid_id_token'));
+  it('Google: rejects an unverified email', () => rejectsGoogle({ claims: { email_verified: false } }, 'email_unverified'));
+  it('Google: a failed token exchange is reported, not thrown', () => rejectsGoogle({ tokenStatus: 500 }, 'token_exchange_failed'));
+
+  it('GitHub: state + PKCE, verified primary email; a new identity becomes a pending signup', async () => {
+    fresh();
+    const { location, state, cookies } = await start('github');
+    expect(Object.fromEntries(location.searchParams)).toMatchObject({ client_id: 'gh-id', scope: 'read:user user:email', code_challenge_method: 'S256' });
+    const res = await callback('github', { state, code: 'abc' }, cookies);
+    expect(github.state.lastVerifierOk).toBe(true);
+    expect(res.headers.location).toBe('/welcome');
+  });
+
+  it('GitHub: refuses an account with no verified primary email', async () => {
+    fresh();
+    github.state.scenario = { emails: [{ email: 'x@example.com', primary: true, verified: false }, { email: 'y@example.com', primary: false, verified: true }] };
+    const { state, cookies } = await start('github');
+    expect((await callback('github', { state, code: 'abc' }, cookies)).headers.location).toBe('/signin?error=email_unverified&provider=github');
+  });
+
+  it('refuses a replayed state, a missing state, a state from another browser, and a cancelled consent', async () => {
+    fresh();
+    const { state, cookies } = await start('google');
+    expect((await callback('google', { state, code: 'abc' }, cookies)).headers.location).toBe('/welcome');
+    expect((await callback('google', { state, code: 'abc' }, cookies)).headers.location).toBe('/signin?error=state_invalid&provider=google');
+    expect((await callback('google', { code: 'abc' }, cookies)).headers.location).toBe('/signin?error=state_mismatch&provider=google');
+    const other = await start('google');
+    expect((await callback('google', { state: other.state, code: 'abc' }, {})).headers.location).toBe('/signin?error=state_mismatch&provider=google');
+    expect((await callback('google', { state: other.state, code: 'abc' }, cookies)).headers.location).toBe('/signin?error=state_mismatch&provider=google');
+    expect((await callback('google', { error: 'access_denied', state: other.state }, other.cookies)).headers.location).toBe('/signin?error=cancelled&provider=google');
+  });
+
+  it('signs a known identity in, rotating the session, and never auto-links by email', async () => {
+    fresh();
+    const existing = await signIn(app, 'own');
+    await pool.query("INSERT INTO identities (user_id, provider, subject, email, email_verified) VALUES ($1, 'google', $2, $3, true)", [existing.id, google.state.subject, google.state.email]);
+    const { state, cookies } = await start('google', { [SESSION_COOKIE]: existing.cookie.split('=')[1] ?? '' });
+    const res = await callback('google', { state, code: 'abc' }, cookies);
+    expect(res.headers.location).toBe('/c/x'); // the ?next= it started with
+    const rotated = cookiesOf(res)[SESSION_COOKIE];
+    expect(rotated).toBeTruthy();
+    expect(`${SESSION_COOKIE}=${rotated ?? ''}`).not.toBe(existing.cookie);
+    expect((await request(app).get('/api/me').set('Cookie', existing.cookie)).status).toBe(401); // the old one is revoked
+    expect((await request(app).get('/api/me').set('Cookie', `${SESSION_COOKIE}=${rotated ?? ''}`)).body.user.id).toBe(existing.id);
+
+    // A GitHub identity with the SAME email but no link: refused, not merged.
+    github.state.email = google.state.email.toUpperCase();
+    const gh = await start('github');
+    expect((await callback('github', { state: gh.state, code: 'abc' }, gh.cookies)).headers.location).toBe('/signin?error=account_exists&provider=github');
+  });
+
+  it('links explicitly from a signed-in session, with the linking rules', async () => {
+    fresh();
+    const me = await signIn(app, 'lnk');
+    const session = { [SESSION_COOKIE]: me.cookie.split('=')[1] ?? '' };
+    const link = async (provider: 'google' | 'github', s: Cookies = session) => {
+      const f = await start(provider, s, 'link');
+      return (await callback(provider, { state: f.state, code: 'abc' }, f.cookies)).headers.location as string;
+    };
+    expect(await link('github')).toBe('/account?linked=github');
+    const ids = await request(app).get('/api/auth/identities').set('Cookie', me.cookie);
+    expect(ids.body.identities.map((i: { provider: string; email: string }) => [i.provider, i.email])).toEqual([['github', github.state.email]]);
+    expect(await link('github')).toBe('/account?linked=github'); // same identity again: already linked
+
+    github.state.id += 1; // a different GitHub account
+    expect(await link('github')).toBe('/account?error=provider_already_linked&provider=github');
+
+    const other = await signIn(app, 'oth');
+    await pool.query("INSERT INTO identities (user_id, provider, subject, email, email_verified) VALUES ($1, 'google', $2, $3, true)", [other.id, google.state.subject, google.state.email]);
+    expect(await link('google')).toBe('/account?error=identity_in_use&provider=google');
+
+    // Started while signed in as one user, finished as another: refused.
+    google.state.subject = randomUUID();
+    const f = await start('google', session, 'link');
+    const third = await signIn(app, 'thr');
+    const res = await callback('google', { state: f.state, code: 'abc' }, { ...f.cookies, [SESSION_COOKIE]: third.cookie.split('=')[1] ?? '' });
+    expect(res.headers.location).toBe('/account?error=link_session_changed&provider=google');
+    expect((await request(app).get('/api/auth/google/link')).status).toBe(401);
+  });
+});
