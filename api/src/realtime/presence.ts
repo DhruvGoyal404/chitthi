@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { Logger } from 'pino';
+import { CONV_CHANNEL } from './fanout.js';
 import { userRoom, type ChitthiSocket, type Realtime } from './server.js';
 
 export type PresenceEvent = { userId: string; online: boolean; lastSeenAt: string | null };
@@ -16,6 +17,9 @@ export const DEFAULT_PRESENCE: PresenceTuning = { graceMs: 10_000 };
  * - On going offline, users.last_seen_at is persisted.
  * - Presence is visible only to users who share an active conversation: events go only to their
  *   user rooms, and each new socket gets a snapshot of exactly those users.
+ * - When a membership starts (DM created, group created, member added), the new member and the
+ *   conversation's other active members are sent each other's presence at once, so nobody has
+ *   to reconnect to see a new contact's status.
  */
 export function attachPresence(realtime: Realtime, pool: pg.Pool, logger: Logger, tuning: PresenceTuning = DEFAULT_PRESENCE) {
   const sockets = new Map<string, Set<string>>();
@@ -36,6 +40,20 @@ export function attachPresence(realtime: Realtime, pool: pg.Pool, logger: Logger
   async function announce(event: PresenceEvent): Promise<void> {
     const rooms = (await coMembers(event.userId)).map(userRoom);
     if (rooms.length > 0) realtime.io.to(rooms).emit('presence', event);
+  }
+
+  const online = (id: string) => (sockets.get(id)?.size ?? 0) > 0 || pendingOffline.has(id);
+
+  /** Current presence of `ids`, exactly as snapshots and the membership exchange report it. */
+  async function presenceOf(ids: string[]): Promise<PresenceEvent[]> {
+    if (ids.length === 0) return [];
+    const { rows } = await pool.query<{ id: string; last_seen_at: Date | null }>(
+      'SELECT id, last_seen_at FROM users WHERE id = ANY($1::uuid[])', [ids],
+    );
+    return rows.map((r) => {
+      const on = online(r.id);
+      return { userId: r.id, online: on, lastSeenAt: on ? null : (r.last_seen_at?.toISOString() ?? null) };
+    });
   }
 
   async function goOffline(userId: string): Promise<void> {
@@ -62,15 +80,7 @@ export function attachPresence(realtime: Realtime, pool: pg.Pool, logger: Logger
     if (!wasOnline) await announce({ userId, online: true, lastSeenAt: null });
 
     // Snapshot of everyone this user may see.
-    const others = await coMembers(userId);
-    const { rows } = await pool.query<{ id: string; last_seen_at: Date | null }>(
-      'SELECT id, last_seen_at FROM users WHERE id = ANY($1::uuid[])', [others],
-    );
-    const snapshot: PresenceEvent[] = rows.map((r) => {
-      const online = (sockets.get(r.id)?.size ?? 0) > 0 || pendingOffline.has(r.id);
-      return { userId: r.id, online, lastSeenAt: online ? null : (r.last_seen_at?.toISOString() ?? null) };
-    });
-    socket.emit('presence:snapshot', { users: snapshot });
+    socket.emit('presence:snapshot', { users: await presenceOf(await coMembers(userId)) });
   }
 
   function gone(socket: ChitthiSocket): void {
@@ -86,8 +96,23 @@ export function attachPresence(realtime: Realtime, pool: pg.Pool, logger: Logger
 
   realtime.onSocket({ ready, gone });
 
+  // A membership started: introduce the new member and the other active members to each other.
+  realtime.onChannel(CONV_CHANNEL, async (p) => {
+    if (p.kind !== 'member_joined' || typeof p.conversation_id !== 'string' || typeof p.user_id !== 'string') return;
+    const joiner = p.user_id;
+    const { rows } = await pool.query<{ user_id: string }>(
+      'SELECT DISTINCT user_id FROM conversation_memberships WHERE conversation_id = $1 AND left_at IS NULL AND user_id <> $2',
+      [p.conversation_id, joiner],
+    );
+    const others = rows.map((r) => r.user_id);
+    if (others.length === 0) return;
+    for (const e of await presenceOf(others)) realtime.io.to(userRoom(joiner)).emit('presence', e);
+    const [me] = await presenceOf([joiner]);
+    if (me) realtime.io.to(others.map(userRoom)).emit('presence', me);
+  });
+
   return {
-    isOnline: (userId: string) => (sockets.get(userId)?.size ?? 0) > 0 || pendingOffline.has(userId),
+    isOnline: online,
     /** Shutdown: everyone still counted as online was last seen now. */
     async flush(): Promise<void> {
       for (const t of pendingOffline.values()) clearTimeout(t);

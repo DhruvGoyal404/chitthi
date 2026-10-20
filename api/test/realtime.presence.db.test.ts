@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import type { PresenceEvent } from '../src/realtime/presence.js';
 import { as, signIn, type Signed } from './apphelpers.js';
 import { adminPool, appPool } from './dbhelpers.js';
-import { connect, next, record, sleep, socketFor, startTestServer, type TestServer } from './sockets.js';
+import { connect, next, record, sleep, socketFor, startTestServer, waitUntil, type TestServer } from './sockets.js';
 
 const apiUrl = inject('apiDbUrl');
 const ownerUrl = inject('dbUrl');
@@ -23,6 +23,8 @@ describe.skipIf(!apiUrl)('presence', () => {
   async function pair(): Promise<[Signed, Signed]> {
     const [a, b] = [await signIn(server.url), await signIn(server.url)];
     await as(server.url, a).post('/conversations/direct', { userId: b.id });
+    // Let the membership presence exchange finish before the test starts recording.
+    await server.realtime.idle();
     return [a, b];
   }
 
@@ -67,6 +69,34 @@ describe.skipIf(!apiUrl)('presence', () => {
     expect(seen).toEqual([]);
     expect(server.presence.isOnline(a.id)).toBe(true);
     for (const s of [watcher, again]) s.disconnect();
+  });
+
+  it('introduces two online users to each other when they start a DM, and a new group member to the group', async () => {
+    const [a, b, c] = [await signIn(server.url), await signIn(server.url), await signIn(server.url)];
+    const [aTab, bTab, cTab] = await Promise.all([connect(server, a), connect(server, b), connect(server, c)]);
+    const atA = record<PresenceEvent>(aTab, 'presence');
+    const atB = record<PresenceEvent>(bTab, 'presence');
+    const atC = record<PresenceEvent>(cTab, 'presence');
+    const about = (seen: PresenceEvent[], id: string) => seen.filter((e) => e.userId === id);
+    await sleep(100);
+    expect([...atA, ...atB]).toEqual([]); // no shared conversation yet: nothing
+
+    await as(server.url, a).post('/conversations/direct', { userId: b.id });
+    await waitUntil(() => about(atA, b.id).length > 0 && about(atB, a.id).length > 0, 5_000, 'DM introduction');
+    expect(about(atA, b.id)[0]).toEqual({ userId: b.id, online: true, lastSeenAt: null });
+    expect(about(atB, a.id)[0]).toEqual({ userId: a.id, online: true, lastSeenAt: null });
+
+    // An offline co-member is introduced with their last seen time.
+    const gid = (await as(server.url, a).post('/conversations', { title: 'Intro', memberIds: [] })).body.conversation.id as string;
+    bTab.disconnect();
+    await waitUntil(() => about(atA, b.id).some((e) => !e.online), 3_000, 'B offline');
+    await as(server.url, a).post(`/conversations/${gid}/members`, { userId: b.id });
+    await as(server.url, a).post(`/conversations/${gid}/members`, { userId: c.id });
+    await waitUntil(() => about(atC, a.id).length > 0 && about(atC, b.id).length > 0 && about(atA, c.id).length > 0, 5_000, 'group introduction');
+    expect(about(atC, a.id)[0]).toEqual({ userId: a.id, online: true, lastSeenAt: null });
+    expect(about(atC, b.id)[0]).toMatchObject({ userId: b.id, online: false, lastSeenAt: expect.any(String) });
+    expect(about(atA, c.id)[0]).toEqual({ userId: c.id, online: true, lastSeenAt: null });
+    for (const s of [aTab, cTab]) s.disconnect();
   });
 
   it('sends a snapshot on connect, limited to users who share an active conversation', async () => {
