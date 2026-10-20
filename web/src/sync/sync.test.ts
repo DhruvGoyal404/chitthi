@@ -48,6 +48,18 @@ class FakeServer implements SyncApi {
     return [...c.rows.values()].filter((m) => !c.hidden.has(m.seq));
   }
 
+  head(conversationId: string): Promise<ConversationHead> {
+    this.calls.push(`head:${conversationId}`);
+    const c = this.conv(conversationId);
+    return Promise.resolve({ id: conversationId, lastSeq: c.lastSeq, changeSeq: c.changeSeq });
+  }
+
+  history(conversationId: string, beforeSeq = Number.MAX_SAFE_INTEGER): Promise<Page> {
+    this.calls.push(`history:${conversationId}<${String(beforeSeq)}`);
+    const rows = this.visible(this.conv(conversationId)).filter((m) => m.seq < beforeSeq).sort((a, b) => b.seq - a.seq);
+    return Promise.resolve({ messages: rows.slice(0, this.pageSize).reverse(), hasMore: rows.length > this.pageSize });
+  }
+
   listConversations(): Promise<ConversationHead[]> {
     this.calls.push('list');
     return Promise.resolve([...this.convs].map(([id, c]) => ({ id, lastSeq: c.lastSeq, changeSeq: c.changeSeq })));
@@ -200,7 +212,7 @@ describe('SyncEngine', () => {
     server.send('c2', 'missed');
     server.edit('c3', 1, 'c3 edited');
     server.send('c4', 'new conversation');
-    socket.deliver('connect');
+    socket.deliver('ready');
     await tick(20);
     await engine.settled();
 
@@ -209,6 +221,49 @@ describe('SyncEngine', () => {
     expect(bodies(engine, 'c2')).toEqual(['c2 hello', 'missed']);
     expect(bodies(engine, 'c3')).toEqual(['c3 edited']);
     expect(engine.get('c4')).toMatchObject({ lastSeq: 1, changeCursor: 1 }); // tracked; history loads when opened
+  });
+
+  it('opens a conversation from its newest page and pages older history on demand', async () => {
+    const { server, socket, engine } = setup();
+    server.pageSize = 3;
+    for (let i = 1; i <= 7; i++) server.send('c9', `m${String(i)}`);
+    await engine.loadLatest('c9');
+    expect(bodies(engine, 'c9')).toEqual(['m5', 'm6', 'm7']);
+    expect(engine.get('c9')).toMatchObject({ lastSeq: 7, changeCursor: 7, hasOlder: true, oldestLoaded: 5 });
+    expect(await engine.loadOlder('c9')).toBe(3);
+    expect(await engine.loadOlder('c9')).toBe(1);
+    expect(await engine.loadOlder('c9')).toBe(0);
+    expect(bodies(engine, 'c9')).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7']);
+    // A push after opening is applied in place.
+    socket.deliver('message:new', server.send('c9', 'm8'));
+    await engine.settled();
+    expect(bodies(engine, 'c9').at(-1)).toBe('m8');
+    expect(server.calls.filter((c) => c.startsWith('seq'))).toEqual([]);
+  });
+
+  it('treats the REST ack like a push: ack before push or push before ack gives one message', async () => {
+    const { server, socket, engine } = setup();
+    const first = server.send('c1', 'ack first');
+    await engine.ingestAck(first.message);
+    socket.deliver('message:new', first);
+    const second = server.send('c1', 'push first');
+    socket.deliver('message:new', second);
+    await engine.ingestAck(second.message);
+    await engine.settled();
+    expect(bodies(engine)).toEqual(['ack first', 'push first']);
+    expect(engine.get('c1')).toMatchObject({ lastSeq: 2, changeCursor: 2 });
+    expect(server.calls).toEqual([]);
+  });
+
+  it('keeps snapshots stable until something changes (for useSyncExternalStore)', async () => {
+    const { server, socket, engine } = setup();
+    socket.deliver('message:new', server.send('c1', 'x'));
+    await engine.settled();
+    const a = engine.messages('c1');
+    expect(engine.messages('c1')).toBe(a);
+    socket.deliver('message:new', server.send('c1', 'y'));
+    await engine.settled();
+    expect(engine.messages('c1')).not.toBe(a);
   });
 
   it('treats a server resync like a reconnect', async () => {

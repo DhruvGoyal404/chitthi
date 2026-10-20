@@ -104,8 +104,40 @@ describe.skipIf(!apiUrl)('REST API (sends, edits, deletes, sync reads)', () => {
     expect(WEB_ORIGIN).toBe('http://localhost:5175');
   });
 
+  it('serves /me, profile edits, handle search, conversation detail and inbox previews', async () => {
+    const { a, b, id } = await dm();
+    expect((await as(app, a).get('/me')).body.user).toEqual({ id: a.id, handle: a.handle, displayName: a.handle });
+    const renamed = await as(app, a).patch('/me', { displayName: '  Asha Rao  ' });
+    expect(renamed.body.user.displayName).toBe('Asha Rao');
+    expect((await as(app, a).patch('/me', { handle: 'Support' })).body.error.code).toBe('handle_reserved');
+    expect((await as(app, a).patch('/me', { handle: b.handle.toUpperCase() })).status).toBe(409);
+    expect((await as(app, a).patch('/me', {})).status).toBe(400);
+
+    const found = await as(app, a).get(`/users?q=${b.handle.slice(0, 6)}`);
+    expect(found.body.users.map((u: { id: string }) => u.id)).toContain(b.id);
+    expect(found.body.users.map((u: { id: string }) => u.id)).not.toContain(a.id); // never yourself
+    expect((await as(app, a).get('/users?q=a')).status).toBe(400);
+    // "_" is a LIKE wildcard: a search for "q…_" must not also match "q…x…".
+    const tag = randomUUID().replace(/-/g, '').slice(0, 6);
+    await pool.query("INSERT INTO users (handle, display_name) VALUES ($1, 'x'), ($2, 'y')", [`q${tag}_lit`, `q${tag}xlit`]);
+    const literal = await as(app, a).get(`/users?q=q${tag}_`);
+    expect(literal.body.users.map((u: { handle: string }) => u.handle)).toEqual([`q${tag}_lit`]);
+    expect((await as(app, a).get('/users?q=%25')).status).toBe(400);
+
+    await as(app, b).post(`/conversations/${id}/messages`, { clientMsgId: randomUUID(), body: 'latest' });
+    const detail = await as(app, a).get(`/conversations/${id}`);
+    expect(detail.body.conversation).toMatchObject({ id, kind: 'direct', lastSeq: 1, myRole: 'member' });
+    expect(detail.body.conversation.members.map((m: { userId: string }) => m.userId).sort()).toEqual([a.id, b.id].sort());
+    const inbox = await as(app, a).get('/conversations');
+    expect(inbox.body.conversations[0]).toMatchObject({
+      id, unread: 1, peer: { id: b.id, handle: b.handle }, lastMessage: { seq: 1, body: 'latest', senderId: b.id, kind: 'text' },
+    });
+    const stranger = await signIn(app, 'rs');
+    expect((await as(app, stranger).get(`/conversations/${id}`)).status).toBe(404);
+  });
+
   it('rate-limits sends per user', async () => {
-    const limited = testApp(pool, apiUrl, { auth: { points: 100, duration: 60 }, send: { points: 2, duration: 60 }, socket: { points: 100, duration: 60 } });
+    const limited = testApp(pool, apiUrl, { auth: { points: 100, duration: 60 }, send: { points: 2, duration: 60 }, socket: { points: 100, duration: 60 }, search: { points: 100, duration: 60 } });
     const a = await signIn(limited, 'rl');
     const b = await signIn(limited, 'rl');
     const id = (await as(limited, a).post('/conversations/direct', { userId: b.id })).body.conversation.id as string;

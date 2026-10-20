@@ -7,7 +7,8 @@ const silent = pino({ level: 'silent' });
 
 /** A pool exactly like the API's: logged in as chitthi_api (inject('apiDbUrl')). */
 export function appPool(apiUrl: string, max = 10): pg.Pool {
-  return createPool(apiUrl, silent, { max });
+  // Concurrency tests queue far more work than `max` on purpose; give checkouts room under load.
+  return createPool(apiUrl, silent, { max, connectionTimeoutMillis: 15_000 });
 }
 
 /** Owner pool (inject('dbUrl')), for arranging states the app may not create (e.g. expired sessions). */

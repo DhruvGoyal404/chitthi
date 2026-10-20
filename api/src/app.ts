@@ -8,14 +8,14 @@ import type { Config } from './config.js';
 import { devLoginRouter } from './devLogin.js';
 import { errorHandler, notFound } from './errors.js';
 import { healthRouter } from './health.js';
-import { createRateLimits, limitBy, type RateLimits } from './limits.js';
+import { createRateLimits, limitBy, limitsFor, type RateLimits } from './limits.js';
 import { requireAllowedOrigin } from './origin.js';
 import { apiRoutes } from './routes.js';
 import { SessionStore } from './sessions.js';
 
 export type AppDeps = { config: Config; logger: Logger; pool: pg.Pool; rateLimits?: RateLimits };
 
-export function createApp({ config, logger, pool, rateLimits = createRateLimits(pool, logger) }: AppDeps): Express {
+export function createApp({ config, logger, pool, rateLimits = createRateLimits(pool, logger, limitsFor(config)) }: AppDeps): Express {
   const sessions = new SessionStore(pool);
   const app = express();
   app.disable('x-powered-by');
@@ -30,7 +30,7 @@ export function createApp({ config, logger, pool, rateLimits = createRateLimits(
   api.use(healthRouter(pool));
   // Per client IP on everything that starts or ends a sign-in.
   api.use(['/auth', '/dev/login'], limitBy(rateLimits.auth, (req) => req.ip ?? 'unknown'));
-  api.use(meRouter(sessions));
+  api.use(meRouter(pool, sessions));
   api.use(apiRoutes(pool, sessions, rateLimits));
   if (config.devLogin) {
     logger.warn('dev login enabled: anyone can sign in as any handle');

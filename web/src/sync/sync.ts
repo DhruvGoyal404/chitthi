@@ -14,8 +14,9 @@
  *     events can never undo an edit or resurrect deleted text.
  *   - events for a conversation are handled one at a time, so events that arrive during a
  *     catch-up are applied after it, without duplicates or holes.
- *   - on (re)connect or `resync`, fetch the conversation list and catch up only the
- *     conversations whose lastSeq / changeSeq differ from ours.
+ *   - on (re)connect (`ready`: the server has joined our rooms) or `resync`, fetch the conversation
+ *     list and catch up only the conversations whose lastSeq / changeSeq differ from ours.
+ *   - a REST send response (the ack) goes through the same rules as a push.
  *   - after storing messages, acknowledge delivery up to lastSeq (`delivered` event), coalesced per
  *     conversation over ackDelayMs: the server rate-limits inbound events, and one ack per message
  *     in a busy group would exceed it.
@@ -43,6 +44,10 @@ export type ChangePage = Page & { nextCursor: number };
 
 export interface SyncApi {
   listConversations(): Promise<ConversationHead[]>;
+  /** Current head of one conversation (fetched before its newest history page). */
+  head(conversationId: string): Promise<ConversationHead>;
+  /** History page before `beforeSeq` (newest page when undefined), oldest first. */
+  history(conversationId: string, beforeSeq?: number): Promise<Page>;
   catchUpBySeq(conversationId: string, afterSeq: number): Promise<Page>;
   catchUpByChange(conversationId: string, afterChange: number): Promise<ChangePage>;
 }
@@ -60,6 +65,10 @@ export type ConversationState = {
   messages: Map<string, Message>;
   /** Change values seen above changeCursor; the cursor advances over contiguous runs of them. */
   seenChanges: Set<number>;
+  /** Older history: the lowest seq loaded, and whether anything visible lies below it. */
+  oldestLoaded: number | null;
+  hasOlder: boolean;
+  historyLoaded: boolean;
 };
 
 export type SyncListener = (conversationId: string) => void;
@@ -81,12 +90,15 @@ export class SyncEngine {
     socket.on('message:new', (e: MessageEvent) => { this.enqueue(e.conversationId, () => this.onEvent(e)); });
     socket.on('message:updated', (e: MessageEvent) => { this.enqueue(e.conversationId, () => this.onEvent(e)); });
     socket.on('resync', () => { void this.resyncAll(); });
-    socket.on('connect', () => { void this.resyncAll(); });
+    socket.on('ready', () => { void this.resyncAll(); });
   }
 
   /** Starts tracking a conversation from a known point (e.g. after loading its newest history page). */
   track(conversationId: string, from: { lastSeq: number; changeCursor: number; messages?: Message[] }): void {
-    const s: ConversationState = { lastSeq: from.lastSeq, changeCursor: from.changeCursor, messages: new Map(), seenChanges: new Set() };
+    const s: ConversationState = {
+      lastSeq: from.lastSeq, changeCursor: from.changeCursor, messages: new Map(), seenChanges: new Set(),
+      oldestLoaded: null, hasOlder: false, historyLoaded: false,
+    };
     for (const m of from.messages ?? []) s.messages.set(m.id, m);
     this.state.set(conversationId, s);
   }
@@ -95,9 +107,86 @@ export class SyncEngine {
     return this.state.get(conversationId);
   }
 
-  /** Messages of a conversation in seq order. */
+  private readonly snapshots = new Map<string, Message[]>();
+  private static readonly EMPTY: Message[] = [];
+
+  /** Messages of a conversation in seq order. Stable between changes (for useSyncExternalStore). */
   messages(conversationId: string): Message[] {
-    return [...(this.state.get(conversationId)?.messages.values() ?? [])].sort((a, b) => a.seq - b.seq);
+    const cached = this.snapshots.get(conversationId);
+    if (cached) return cached;
+    const s = this.state.get(conversationId);
+    if (!s) return SyncEngine.EMPTY;
+    const list = [...s.messages.values()].sort((a, b) => a.seq - b.seq);
+    this.snapshots.set(conversationId, list);
+    return list;
+  }
+
+  /**
+   * Opens a conversation: head first, then the newest page, so nothing that changes in between can
+   * be skipped (the cursor may be a little behind, which only costs a catch-up). Idempotent.
+   */
+  loadLatest(conversationId: string): Promise<void> {
+    return new Promise((resolve) => {
+      this.enqueue(conversationId, async () => {
+        try {
+          let s = this.state.get(conversationId);
+          if (s?.historyLoaded) return;
+          const head = await this.api.head(conversationId);
+          const page = await this.api.history(conversationId);
+          if (!s) {
+            this.track(conversationId, { lastSeq: head.lastSeq, changeCursor: head.changeSeq });
+            s = this.state.get(conversationId);
+          }
+          if (!s) return;
+          this.apply(s, page.messages);
+          const top = page.messages.at(-1)?.seq ?? 0;
+          if (top > s.lastSeq) s.lastSeq = top;
+          s.oldestLoaded = page.messages[0]?.seq ?? null;
+          s.hasOlder = page.hasMore;
+          s.historyLoaded = true;
+          // A head newer than the page (something arrived in between) is repaired like any gap.
+          if (head.lastSeq > s.lastSeq) await this.catchUpSeq(conversationId, s);
+          this.changed(conversationId, s);
+        } finally {
+          resolve();
+        }
+      });
+    });
+  }
+
+  /** Loads the next older page (infinite scroll upwards). Resolves with how many were added. */
+  loadOlder(conversationId: string): Promise<number> {
+    return new Promise((resolve) => {
+      this.enqueue(conversationId, async () => {
+        let added = 0;
+        try {
+          const s = this.state.get(conversationId);
+          if (!s?.hasOlder || s.oldestLoaded === null) return;
+          const page = await this.api.history(conversationId, s.oldestLoaded);
+          const before = s.messages.size;
+          this.apply(s, page.messages);
+          added = s.messages.size - before;
+          s.oldestLoaded = page.messages[0]?.seq ?? s.oldestLoaded;
+          s.hasOlder = page.hasMore;
+          this.changed(conversationId, s, false);
+        } finally {
+          resolve(added);
+        }
+      });
+    });
+  }
+
+  /** A REST send/edit/delete response: same rules as a push (the push may come before or after). */
+  ingestAck(message: Message): Promise<void> {
+    return new Promise((resolve) => {
+      this.enqueue(message.conversationId, async () => {
+        try {
+          await this.onEvent({ conversationId: message.conversationId, seq: message.seq, changeSeq: message.changeSeq, message });
+        } finally {
+          resolve();
+        }
+      });
+    });
   }
 
   subscribe(listener: SyncListener): () => void {
@@ -198,9 +287,10 @@ export class SyncEngine {
     for (const c of s.seenChanges) if (c <= s.changeCursor) s.seenChanges.delete(c);
   }
 
-  private changed(conversationId: string, s: ConversationState): void {
+  private changed(conversationId: string, s: ConversationState, ack = true): void {
+    this.snapshots.delete(conversationId);
     for (const l of this.listeners) l(conversationId);
-    if (this.pendingAcks.has(conversationId)) return;
+    if (!ack || this.pendingAcks.has(conversationId)) return;
     this.pendingAcks.set(conversationId, setTimeout(() => {
       this.pendingAcks.delete(conversationId);
       this.socket.emit('delivered', { conversationId, seq: s.lastSeq });

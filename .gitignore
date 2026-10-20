@@ -21,3 +21,8 @@ uploads/
 logs/
 .DS_Store
 Thumbs.db
+
+# Playwright output
+test-results/
+playwright-report/
+blob-report/

@@ -186,7 +186,7 @@ export type InboxEntry = {
   kind: 'direct' | 'group';
   title: string | null;
   /** The other participant of a direct conversation. */
-  peer: { id: string; handle: string } | null;
+  peer: { id: string; handle: string; displayName: string } | null;
   active: boolean;
   role: Role;
   lastSeq: number;
@@ -196,6 +196,8 @@ export type InboxEntry = {
   lastDeliveredSeq: number;
   /** Live text messages from others after the read marker, within the visible window; capped at 1000. */
   unread: number;
+  /** The newest message the user can see here (a tombstone has body null). */
+  lastMessage: { seq: number; senderId: string | null; kind: 'text' | 'system'; body: string | null; meta: Record<string, unknown> | null; deletedAt: Date | null; createdAt: Date } | null;
 };
 
 export const UNREAD_CAP = 1000;
@@ -213,23 +215,31 @@ const unreadSql = (userParam: string) => `(SELECT count(*)::int FROM (
 
 /** Every conversation the user can read (active or read-only), most recent activity first. */
 export async function listConversations(pool: pg.Pool, userId: string, limit = 50): Promise<InboxEntry[]> {
-  const { rows } = await pool.query<InboxEntry & { peer_id: string | null; peer_handle: string | null }>(
+  const { rows } = await pool.query<InboxEntry & { peer_id: string | null; peer_handle: string | null; peer_name: string | null }>(
     `SELECT c.id, c.kind, c.title, c.last_seq AS "lastSeq", c.change_seq AS "changeSeq", c.last_message_at AS "lastMessageAt",
             p.left_at IS NULL AS active, p.role,
             r.last_read_seq AS "lastReadSeq", r.last_delivered_seq AS "lastDeliveredSeq",
             ${unreadSql('$1')} AS unread,
-            peer.id AS peer_id, peer.handle AS peer_handle
+            peer.id AS peer_id, peer.handle AS peer_handle, peer.display_name AS peer_name,
+            (SELECT json_build_object('seq', x.seq, 'senderId', x.sender_id, 'kind', x.kind, 'body', x.body,
+                                      'meta', x.meta, 'deletedAt', x.deleted_at, 'createdAt', x.created_at)
+               FROM messages x
+              WHERE x.conversation_id = c.id AND x.seq >= p.joined_seq AND x.seq <= COALESCE(p.left_seq, c.last_seq)
+              ORDER BY x.seq DESC LIMIT 1) AS "lastMessage"
        FROM (SELECT DISTINCT ON (conversation_id) * FROM conversation_memberships
               WHERE user_id = $1 ORDER BY conversation_id, joined_seq DESC) p
        JOIN conversations c ON c.id = p.conversation_id
        JOIN read_markers r ON r.conversation_id = c.id AND r.user_id = $1
        LEFT JOIN direct_conversations d ON d.conversation_id = c.id
        LEFT JOIN users peer ON peer.id = CASE WHEN d.user_lo = $1 THEN d.user_hi ELSE d.user_lo END
-      ORDER BY c.last_message_at DESC NULLS LAST, c.id DESC
+      ORDER BY COALESCE(c.last_message_at, c.created_at) DESC, c.id DESC
       LIMIT $2`,
     [userId, limit],
   );
-  return rows.map(({ peer_id, peer_handle, ...e }) => ({ ...e, peer: peer_id && peer_handle ? { id: peer_id, handle: peer_handle } : null }));
+  return rows.map(({ peer_id, peer_handle, peer_name, ...e }) => ({
+    ...e,
+    peer: peer_id && peer_handle ? { id: peer_id, handle: peer_handle, displayName: peer_name ?? peer_handle } : null,
+  }));
 }
 
 /** Unread count for one conversation (same definition as the inbox). 404 for non-members. */
@@ -245,4 +255,51 @@ export async function unreadCount(pool: pg.Pool, conversationId: string, userId:
   );
   if (!row) throw notFound();
   return row.unread;
+}
+
+export type Member = {
+  userId: string;
+  handle: string;
+  displayName: string;
+  role: Role;
+  /** The latest membership period. */
+  joinedSeq: number;
+  leftSeq: number | null;
+  active: boolean;
+  lastReadSeq: number;
+  lastDeliveredSeq: number;
+};
+
+export type ConversationDetail = Conversation & {
+  lastSeq: number;
+  changeSeq: number;
+  /** The caller's role, or null when they can only read (former member). */
+  myRole: Role | null;
+  members: Member[];
+};
+
+/**
+ * One conversation with its members and their read/delivered markers (for ticks, the member list
+ * and group management). Readable by anyone with a membership period; 404 otherwise.
+ */
+export async function getConversation(pool: pg.Pool, conversationId: string, userId: string): Promise<ConversationDetail> {
+  assertUuid(conversationId, 'Conversation');
+  const access = await accessOf(pool, conversationId, userId);
+  if (!access) throw notFound();
+  const { rows: [conv] } = await pool.query<Conversation & { lastSeq: number; changeSeq: number }>(
+    `SELECT ${CONV_COLUMNS}, c.last_seq AS "lastSeq", c.change_seq AS "changeSeq" FROM conversations c WHERE c.id = $1`, [conversationId],
+  );
+  if (!conv) throw notFound();
+  const { rows: members } = await pool.query<Member>(
+    `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName", p.role, p.joined_seq AS "joinedSeq",
+            p.left_seq AS "leftSeq", p.left_at IS NULL AS active,
+            r.last_read_seq AS "lastReadSeq", r.last_delivered_seq AS "lastDeliveredSeq"
+       FROM (SELECT DISTINCT ON (user_id) * FROM conversation_memberships
+              WHERE conversation_id = $1 ORDER BY user_id, joined_seq DESC) p
+       JOIN users u ON u.id = p.user_id
+       JOIN read_markers r ON r.conversation_id = p.conversation_id AND r.user_id = p.user_id
+      ORDER BY p.left_at IS NULL DESC, CASE p.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, lower(u.handle)`,
+    [conversationId],
+  );
+  return { ...conv, myRole: access.activeRole, members };
 }

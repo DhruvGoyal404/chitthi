@@ -80,7 +80,7 @@ describe.skipIf(!apiUrl)('socket handshake and session lifetime', () => {
 
   it('limits connections per user', async () => {
     const strict = await startTestServer(pool, apiUrl, {
-      limits: { auth: { points: 100, duration: 60 }, send: { points: 100, duration: 60 }, socket: { points: 2, duration: 60 } },
+      limits: { auth: { points: 100, duration: 60 }, send: { points: 100, duration: 60 }, socket: { points: 2, duration: 60 }, search: { points: 2, duration: 60 } },
     });
     try {
       const u = await signIn(strict.url);

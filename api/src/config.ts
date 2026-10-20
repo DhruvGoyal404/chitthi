@@ -20,6 +20,8 @@ const schema = z
       .transform((s) => s.split(',').map((o) => o.trim()).filter(Boolean))
       .pipe(z.array(z.url()).min(1)),
     DEV_LOGIN: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+    // Sign-in attempts per IP per 10 minutes (default 30). Raised only for end-to-end test runs.
+    RATE_LIMIT_AUTH: z.preprocess((v) => (v === '' ? undefined : v), z.coerce.number().int().min(1).max(100_000).optional()),
   })
   .superRefine((env, ctx) => {
     if (env.DEV_LOGIN && !devLoginAllowed(env.NODE_ENV)) {
@@ -39,6 +41,7 @@ export type Config = {
   logLevel: string;
   webOrigins: string[];
   devLogin: boolean;
+  authLimitPoints: number | undefined;
 };
 
 export class ConfigError extends Error {
@@ -61,6 +64,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logLevel: e.LOG_LEVEL,
     webOrigins: e.WEB_ORIGINS,
     devLogin: e.DEV_LOGIN,
+    authLimitPoints: e.RATE_LIMIT_AUTH,
   };
 }
 

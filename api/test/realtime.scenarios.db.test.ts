@@ -216,6 +216,10 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
     const gid = (await api(sender).post('/conversations', { title: 'Latency', memberIds: members.map((m) => m.id) })).body.conversation.id as string;
     const sockets = (await Promise.all(members.map(async (m) => [await connect(server, m), await connect(server, m)]))).flat();
     expect(sockets).toHaveLength(200);
+    // Measure steady state: let the setup burst (200 connects, snapshots, the group's presence
+    // introduction) finish first. The clients share this process with the server.
+    await server.realtime.idle();
+    await sleep(1_000);
 
     const N = 25;
     const sentAt = new Map<number, number>();

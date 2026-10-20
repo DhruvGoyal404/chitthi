@@ -10,12 +10,21 @@ pg.types.setTypeParser(pg.types.builtins.INT8, (value: string) => {
 });
 
 /** The API connects as chitthi_api (docs/SCHEMA.md §3): least privilege comes from the login itself. */
-export function createPool(databaseUrl: string, logger: Logger, { max = 10 }: { max?: number } = {}): pg.Pool {
+export type PoolOptions = {
+  max?: number;
+  /**
+   * How long to wait for a connection: a new one, and also a free one when the pool is full
+   * (pg-pool uses the same timeout for both). 5 s matches the statement timeout.
+   */
+  connectionTimeoutMillis?: number;
+};
+
+export function createPool(databaseUrl: string, logger: Logger, { max = 10, connectionTimeoutMillis = 5_000 }: PoolOptions = {}): pg.Pool {
   const pool = new pg.Pool({
     connectionString: databaseUrl,
     max,
     idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 2_000,
+    connectionTimeoutMillis,
     statement_timeout: 5_000,
   });
   // An idle client losing its connection emits 'error' on the pool; unhandled, that would crash the process.

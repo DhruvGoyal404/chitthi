@@ -57,3 +57,38 @@ export async function findUserByHandle(pool: pg.Pool, handle: string): Promise<U
   );
   return user;
 }
+
+export async function getUser(pool: pg.Pool, id: string): Promise<User | undefined> {
+  const { rows: [user] } = await pool.query<User>(`SELECT ${USER_COLUMNS} FROM users u WHERE u.id = $1 AND u.disabled_at IS NULL`, [id]);
+  return user;
+}
+
+/** Changes the caller's handle and/or display name; handle rules are enforced by the database. */
+export async function updateProfile(pool: pg.Pool, id: string, patch: { handle?: string; displayName?: string }): Promise<User> {
+  try {
+    const { rows: [user] } = await pool.query<User>(
+      `UPDATE users u SET handle = COALESCE($2, u.handle), display_name = COALESCE($3, u.display_name)
+        WHERE u.id = $1 AND u.disabled_at IS NULL RETURNING ${USER_COLUMNS}`,
+      [id, patch.handle ?? null, patch.displayName?.trim() ?? null],
+    );
+    if (!user) throw new HttpError(404, 'user_not_found', 'User not found');
+    return user;
+  } catch (err) {
+    throw mapUserError(err);
+  }
+}
+
+/**
+ * Handle prefix search for starting a conversation: active users only, never the caller, at most
+ * `limit`. `_` is a LIKE wildcard, so it is escaped; handles contain nothing else special.
+ */
+export async function searchUsers(pool: pg.Pool, prefix: string, callerId: string, limit = 8): Promise<User[]> {
+  const pattern = `${prefix.toLowerCase().replaceAll('_', '\\_')}%`;
+  const { rows } = await pool.query<User>(
+    `SELECT ${USER_COLUMNS} FROM users u
+      WHERE lower(u.handle) LIKE $1 AND u.id <> $2 AND u.disabled_at IS NULL
+      ORDER BY lower(u.handle) LIMIT $3`,
+    [pattern, callerId, limit],
+  );
+  return rows;
+}

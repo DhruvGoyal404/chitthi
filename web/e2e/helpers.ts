@@ -1,0 +1,27 @@
+import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { randomBytes } from 'node:crypto';
+
+export const handle = (prefix = 'e2e') => `${prefix}_${randomBytes(5).toString('hex')}`;
+
+/** A signed-in browser context of its own (cookies are per context, like separate devices). */
+export async function signedIn(browser: Browser, prefix = 'e2e', opts: Parameters<Browser['newContext']>[0] = {}): Promise<{ context: BrowserContext; page: Page; handle: string; id: string }> {
+  const context = await browser.newContext(opts);
+  const page = await context.newPage();
+  const h = handle(prefix);
+  await page.goto('/signin');
+  await page.getByLabel('Your handle').fill(h);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByRole('navigation', { name: 'Conversations' })).toBeVisible();
+  const me = await page.request.get('/api/me');
+  const { user } = (await me.json()) as { user: { id: string } };
+  return { context, page, handle: h, id: user.id };
+}
+
+/** Starts (or opens) a DM from `page` with the user whose handle is `other`. */
+export async function openDm(page: Page, other: string): Promise<string> {
+  await page.goto('/new');
+  await page.getByLabel('Find someone by handle').fill(other);
+  await page.getByRole('button', { name: new RegExp(other) }).click();
+  await page.waitForURL(/\/c\/[0-9a-f-]{36}$/);
+  return page.url().split('/c/')[1] ?? '';
+}

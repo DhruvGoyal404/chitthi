@@ -14,13 +14,21 @@ export type Limits = {
   send: Limit;
   /** Socket connections per user. */
   socket: Limit;
+  /** Handle searches per user. */
+  search: Limit;
 };
 
 export const DEFAULT_LIMITS: Limits = {
   auth: { points: 30, duration: 10 * 60 },
   send: { points: 120, duration: 60 },
   socket: { points: 30, duration: 60 },
+  search: { points: 60, duration: 60 },
 };
+
+/** DEFAULT_LIMITS with configured overrides (only the sign-in limit is configurable, for e2e runs). */
+export function limitsFor(config: { authLimitPoints: number | undefined }): Limits {
+  return config.authLimitPoints === undefined ? DEFAULT_LIMITS : { ...DEFAULT_LIMITS, auth: { ...DEFAULT_LIMITS.auth, points: config.authLimitPoints } };
+}
 
 export type RateLimit = (key: string) => Promise<void>;
 export type RateLimits = Record<keyof Limits, RateLimit>;
@@ -56,7 +64,7 @@ export function createRateLimits(pool: pg.Pool, logger: Logger, limits: Limits =
       }
     };
   };
-  return { auth: make('auth'), send: make('send'), socket: make('socket') };
+  return { auth: make('auth'), send: make('send'), socket: make('socket'), search: make('search') };
 }
 
 /** Express middleware: limit by a key derived from the request (429 with Retry-After when exceeded). */

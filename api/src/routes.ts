@@ -5,12 +5,12 @@ import { requireSession, sessionOf } from './auth.js';
 import { HttpError } from './errors.js';
 import { limitBy, type RateLimits } from './limits.js';
 import {
-  addMember, createGroup, findOrCreateDirect, leave, listConversations, removeMember,
+  addMember, createGroup, findOrCreateDirect, getConversation, leave, listConversations, removeMember,
 } from './repo/conversations.js';
 import {
   catchUpByChange, catchUpBySeq, deleteForEveryone, editMessage, history, markRead, MAX_PAGE, sendMessage,
 } from './repo/messages.js';
-import { findUserByHandle } from './repo/users.js';
+import { findUserByHandle, searchUsers } from './repo/users.js';
 import type { SessionStore } from './sessions.js';
 
 const uuid = z.uuid();
@@ -27,6 +27,7 @@ const messagesQuery = z
   .object({ before: seq.optional(), after: seq.optional(), limit })
   .refine((q) => q.before === undefined || q.after === undefined, 'use before or after, not both');
 const changesQuery = z.object({ after: seq, limit });
+const searchQuery = z.object({ q: z.string().trim().regex(/^[A-Za-z0-9_]{2,20}$/, '2–20 characters: letters, digits or _') });
 
 /** Path ids are validated like everything else: a malformed id is simply not found. */
 function pathId(value: unknown, what: string): string {
@@ -45,6 +46,12 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
   const r = Router();
   r.use(['/conversations', '/users'], requireSession(sessions));
   const sendLimit = limitBy(rateLimits.send, (_req, res) => me(res));
+  const searchLimit = limitBy(rateLimits.search, (_req, res) => me(res));
+
+  r.get('/users', searchLimit, async (req, res) => {
+    const { q } = searchQuery.parse(req.query);
+    res.json({ users: await searchUsers(pool, q, me(res)) });
+  });
 
   r.get('/users/:handle', async (req, res) => {
     const user = await findUserByHandle(pool, req.params.handle);
@@ -54,6 +61,10 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
 
   r.get('/conversations', async (_req, res) => {
     res.json({ conversations: await listConversations(pool, me(res)) });
+  });
+
+  r.get('/conversations/:id', async (req, res) => {
+    res.json({ conversation: await getConversation(pool, pathId(req.params.id, 'Conversation'), me(res)) });
   });
 
   r.post('/conversations/direct', async (req, res) => {

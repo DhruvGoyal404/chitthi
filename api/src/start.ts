@@ -3,7 +3,7 @@ import type pg from 'pg';
 import type { Logger } from 'pino';
 import { createApp } from './app.js';
 import type { Config } from './config.js';
-import { createRateLimits, type RateLimits } from './limits.js';
+import { createRateLimits, limitsFor, type RateLimits } from './limits.js';
 import { attachFanout, CONV_CHANNEL } from './realtime/fanout.js';
 import { PgListener, SESSION_CHANNEL } from './realtime/listener.js';
 import { attachPresence, DEFAULT_PRESENCE, type PresenceTuning } from './realtime/presence.js';
@@ -39,7 +39,7 @@ export type StartOptions = {
  */
 export async function startApi(opts: StartOptions): Promise<Started> {
   const { config, logger, pool } = opts;
-  const rateLimits = opts.rateLimits ?? createRateLimits(pool, logger);
+  const rateLimits = opts.rateLimits ?? createRateLimits(pool, logger, limitsFor(config));
   const app = createApp({ config, logger, pool, rateLimits });
   const httpServer = createServer(app);
   const listener = new PgListener(config.databaseUrl, [SESSION_CHANNEL, CONV_CHANNEL], logger, opts.listenerBackoff);

@@ -33,7 +33,7 @@ describe.skipIf(!url)('dev login and Postgres sessions', () => {
     const { logger } = captureLogger(config);
     // A namespace per app keeps each test's rate-limit counters separate in the shared table.
     const namespace = `t${randomBytes(4).toString('hex')}:`;
-    const rateLimits = createRateLimits(pool, logger, { auth: { points: opts.authPoints ?? 100, duration: 60 }, send: { points: 1000, duration: 60 }, socket: { points: 1000, duration: 60 } }, namespace);
+    const rateLimits = createRateLimits(pool, logger, { auth: { points: opts.authPoints ?? 100, duration: 60 }, send: { points: 1000, duration: 60 }, socket: { points: 1000, duration: 60 }, search: { points: 1000, duration: 60 } }, namespace);
     return createApp({ config, logger, pool, rateLimits });
   }
 
@@ -63,7 +63,7 @@ describe.skipIf(!url)('dev login and Postgres sessions', () => {
 
     const me = await request(app).get('/api/me').set('Cookie', pair(cookie));
     expect(me.status).toBe(200);
-    expect(me.body.user).toEqual(res.body.user);
+    expect(me.body.user).toEqual({ ...res.body.user, displayName: handle });
 
     // Same handle in any case → same user (the dev identity is keyed by lower(handle)).
     const again = await login(app, handle.toUpperCase());
