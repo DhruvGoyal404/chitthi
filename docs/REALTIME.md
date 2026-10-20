@@ -45,6 +45,7 @@ PostgreSQL's `NOTIFY` payload is limited to **8000 bytes**. A message body can b
 |---|---|---|
 | `chitthi_conv` | `{kind: "message_new" \| "message_updated", conversation_id, message_id, seq, change_seq}` | `messages_notify` (AFTER INSERT/UPDATE; no-op updates send nothing) |
 | `chitthi_conv` | `{kind: "markers", conversation_id, user_id, read_seq, delivered_seq, read_moved, delivered_moved}` | `read_markers_notify` |
+| `chitthi_conv` | `{kind: "member_joined", conversation_id, user_id}` | `memberships_notify` (presence introductions) |
 | `chitthi_session` | `{session_id}` or `{user_id}` | session revoked; user disabled |
 
 The listener reads the row once, as it is at that moment. If the message was deleted for everyone before fan-out reached it, the push carries the tombstone (`body: null`); the erased text is never sent. NOTIFY is transactional: a rolled-back send notifies nobody, and notifications arrive in commit order.
@@ -70,7 +71,8 @@ Server → client:
 | `read:updated` / `delivered:updated` | `{conversationId, userId, seq}` | Markers only move forward. |
 | `typing` | `{conversationId, userId, typing, ttlMs}` | Ephemeral. Treat `typing: true` as expiring after `ttlMs` unless refreshed. |
 | `presence` | `{userId, online, lastSeenAt}` | Only about users who share an active conversation with you. |
-| `presence:snapshot` | `{users: [...]}` | Sent once per socket after `ready`. |
+| `presence:snapshot` | `{users: [...]}` | Sent once per socket after `ready`: the full set the user may see. |
+| `presence:update` | `{users: [...]}` | Upsert a few users. Sent when a membership starts (new DM, new group, member added), so the new member and the others learn each other's status without reconnecting. |
 | `resync` | none | The server may have missed notifications, so catch up everything (§6). |
 
 Client → server (anything else disconnects):
@@ -102,6 +104,7 @@ Per conversation the client keeps `lastSeq` (every visible message up to it is s
   - Online when the first socket connects.
   - Offline only after ~10 s with zero sockets, so a reload within the grace produces no events at all.
   - `users.last_seen_at` is written when the user goes offline, and on shutdown.
+  - When a membership starts, the new member and the other active members get each other's presence (`presence:update`). This happens **outside** the ordered queue and is coalesced per conversation for 25 ms, so a 100-member group creation is one batch (two queries) and never delays message fan-out. A first version did this per membership inside the queue, and the 200-socket test caught it holding message delivery back by ~5 s.
 
 ## 8. Guarantees
 

@@ -6,6 +6,8 @@ import { userRoom, type ChitthiSocket, type Realtime } from './server.js';
 export type PresenceEvent = { userId: string; online: boolean; lastSeenAt: string | null };
 export type PresenceTuning = { graceMs: number };
 export const DEFAULT_PRESENCE: PresenceTuning = { graceMs: 10_000 };
+/** Joins committed within this window are introduced together (a DM or group creation is one batch). */
+const INTRO_BATCH_MS = 25;
 
 /**
  * Presence for a single API instance (docs/REALTIME.md covers what a second instance needs).
@@ -96,25 +98,57 @@ export function attachPresence(realtime: Realtime, pool: pg.Pool, logger: Logger
 
   realtime.onSocket({ ready, gone });
 
-  // A membership started: introduce the new member and the other active members to each other.
-  realtime.onChannel(CONV_CHANNEL, async (p) => {
-    if (p.kind !== 'member_joined' || typeof p.conversation_id !== 'string' || typeof p.user_id !== 'string') return;
-    const joiner = p.user_id;
+  // A membership started: introduce the new members and the other active members to each other.
+  // Deliberately NOT done inside the ordered queue (presence needn't be ordered with messages, and a
+  // 100-member group creation would otherwise hold message fan-out back by seconds). Joins are
+  // coalesced per conversation for INTRO_BATCH_MS, so one creation costs two queries in total, and
+  // each recipient gets a single presence:update with every user it should learn about.
+  const pendingJoins = new Map<string, Set<string>>();
+  let flushTimer: NodeJS.Timeout | undefined;
+
+  async function introduce(conversationId: string, joiners: Set<string>): Promise<void> {
     const { rows } = await pool.query<{ user_id: string }>(
-      'SELECT DISTINCT user_id FROM conversation_memberships WHERE conversation_id = $1 AND left_at IS NULL AND user_id <> $2',
-      [p.conversation_id, joiner],
+      'SELECT DISTINCT user_id FROM conversation_memberships WHERE conversation_id = $1 AND left_at IS NULL',
+      [conversationId],
     );
-    const others = rows.map((r) => r.user_id);
-    if (others.length === 0) return;
-    for (const e of await presenceOf(others)) realtime.io.to(userRoom(joiner)).emit('presence', e);
-    const [me] = await presenceOf([joiner]);
-    if (me) realtime.io.to(others.map(userRoom)).emit('presence', me);
+    const members = rows.map((r) => r.user_id);
+    if (members.length < 2) return;
+    const byId = new Map((await presenceOf(members)).map((e) => [e.userId, e]));
+    const of = (ids: string[]) => ids.flatMap((id) => byId.get(id) ?? []);
+    // Each joiner learns about every other member; existing members learn about the joiners.
+    for (const j of joiners) {
+      const users = of(members.filter((m) => m !== j));
+      if (users.length > 0) realtime.io.to(userRoom(j)).emit('presence:update', { users });
+    }
+    const existing = members.filter((m) => !joiners.has(m));
+    const joined = of([...joiners]);
+    if (existing.length > 0 && joined.length > 0) realtime.io.to(existing.map(userRoom)).emit('presence:update', { users: joined });
+  }
+
+  function flushJoins(): void {
+    flushTimer = undefined;
+    const batch = [...pendingJoins];
+    pendingJoins.clear();
+    for (const [conversationId, joiners] of batch) {
+      introduce(conversationId, joiners).catch((err: unknown) => { logger.error({ err }, 'presence introduction failed'); });
+    }
+  }
+
+  realtime.onChannel(CONV_CHANNEL, (p) => {
+    if (p.kind !== 'member_joined' || typeof p.conversation_id !== 'string' || typeof p.user_id !== 'string') return Promise.resolve();
+    const set = pendingJoins.get(p.conversation_id) ?? new Set<string>();
+    set.add(p.user_id);
+    pendingJoins.set(p.conversation_id, set);
+    flushTimer ??= setTimeout(flushJoins, INTRO_BATCH_MS);
+    return Promise.resolve();
   });
 
   return {
     isOnline: online,
     /** Shutdown: everyone still counted as online was last seen now. */
     async flush(): Promise<void> {
+      clearTimeout(flushTimer);
+      pendingJoins.clear();
       for (const t of pendingOffline.values()) clearTimeout(t);
       const users = [...new Set([...sockets.keys(), ...pendingOffline.keys()])];
       pendingOffline.clear();

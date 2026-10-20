@@ -74,9 +74,16 @@ describe.skipIf(!apiUrl)('presence', () => {
   it('introduces two online users to each other when they start a DM, and a new group member to the group', async () => {
     const [a, b, c] = [await signIn(server.url), await signIn(server.url), await signIn(server.url)];
     const [aTab, bTab, cTab] = await Promise.all([connect(server, a), connect(server, b), connect(server, c)]);
-    const atA = record<PresenceEvent>(aTab, 'presence');
-    const atB = record<PresenceEvent>(bTab, 'presence');
-    const atC = record<PresenceEvent>(cTab, 'presence');
+    // Everything a tab learns about others, from single changes and from batched introductions.
+    const learned = (s: typeof aTab) => {
+      const seen: PresenceEvent[] = [];
+      s.on('presence', (e: PresenceEvent) => seen.push(e));
+      s.on('presence:update', (u: { users: PresenceEvent[] }) => seen.push(...u.users));
+      return seen;
+    };
+    const atA = learned(aTab);
+    const atB = learned(bTab);
+    const atC = learned(cTab);
     const about = (seen: PresenceEvent[], id: string) => seen.filter((e) => e.userId === id);
     await sleep(100);
     expect([...atA, ...atB]).toEqual([]); // no shared conversation yet: nothing
