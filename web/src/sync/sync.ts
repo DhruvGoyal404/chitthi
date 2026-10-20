@@ -14,6 +14,7 @@
  *     events can never undo an edit or resurrect deleted text.
  *   - events for a conversation are handled one at a time, so events that arrive during a
  *     catch-up are applied after it, without duplicates or holes.
+ *   - a push for a conversation we don't track yet starts tracking it from zero (and catches up).
  *   - on (re)connect (`ready`: the server has joined our rooms) or `resync`, fetch the conversation
  *     list and catch up only the conversations whose lastSeq / changeSeq differ from ours.
  *   - a REST send response (the ack) goes through the same rules as a push.
@@ -38,7 +39,8 @@ export type Message = {
 };
 
 export type MessageEvent = { conversationId: string; seq: number; changeSeq: number; message: Message };
-export type ConversationHead = { id: string; lastSeq: number; changeSeq: number };
+/** A conversation's head; `deliveredSeq` is this user's delivered marker (from the list). */
+export type ConversationHead = { id: string; lastSeq: number; changeSeq: number; deliveredSeq?: number };
 export type Page = { messages: Message[]; hasMore: boolean };
 export type ChangePage = Page & { nextCursor: number };
 
@@ -211,8 +213,16 @@ export class SyncEngine {
       this.enqueue(h.id, async () => {
         const s = this.state.get(h.id);
         if (!s) {
-          // Not loaded yet: start from the server's head; history is fetched when it is opened.
-          this.track(h.id, { lastSeq: h.lastSeq, changeCursor: h.changeSeq });
+          // Not loaded yet: history is fetched when it is opened. Start from our delivered marker, so
+          // the (usually few) messages we have never received are fetched now and acknowledged:
+          // "delivered" means this device holds them. Older edits need no catch-up.
+          const from = Math.min(h.deliveredSeq ?? h.lastSeq, h.lastSeq);
+          this.track(h.id, { lastSeq: from, changeCursor: h.changeSeq });
+          const t = this.state.get(h.id);
+          if (t && h.lastSeq > from) {
+            await this.catchUpSeq(h.id, t);
+            this.changed(h.id, t);
+          }
         } else if (h.lastSeq > s.lastSeq || h.changeSeq > s.changeCursor) {
           if (h.lastSeq > s.lastSeq) await this.catchUpSeq(h.id, s);
           if (h.changeSeq > s.changeCursor) await this.catchUpChanges(h.id, s);
@@ -232,8 +242,14 @@ export class SyncEngine {
   }
 
   private async onEvent(e: MessageEvent): Promise<void> {
-    const s = this.state.get(e.conversationId);
-    if (!s) return; // not tracked yet: the conversation list (resyncAll) will introduce it
+    let s = this.state.get(e.conversationId);
+    if (!s) {
+      // A conversation that appeared since the last resync (e.g. someone started a DM with us):
+      // track it from the beginning, so the gap check below fetches everything we may see.
+      this.track(e.conversationId, { lastSeq: 0, changeCursor: 0 });
+      s = this.state.get(e.conversationId);
+      if (!s) return;
+    }
     this.apply(s, [e.message]);
     if (e.seq === s.lastSeq + 1) s.lastSeq = e.seq;
     else if (e.seq > s.lastSeq) await this.catchUpSeq(e.conversationId, s);

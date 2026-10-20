@@ -64,6 +64,11 @@ export class Outbox {
     this.changed(p.conversationId);
   }
 
+  /** Failed sends a retry can fix (no permanent error from the server), in every conversation. */
+  retryable(): Pending[] {
+    return [...this.items.values()].filter((p) => p.status === 'failed' && p.error === undefined);
+  }
+
   list(conversationId: string): Pending[] {
     let s = this.snapshots.get(conversationId);
     if (!s) {

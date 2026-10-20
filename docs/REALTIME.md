@@ -95,6 +95,11 @@ Per conversation the client keeps `lastSeq` (every visible message up to it is s
 5. **(Re)connect or `resync`:** `GET /api/conversations` returns each conversation's `lastSeq` and `changeSeq`. Catch up only the conversations that differ.
 6. **Acks:** after storing, send `delivered {conversationId, seq: lastSeq}`, coalesced per conversation (~300 ms). One ack per message would trip the inbound rate limit.
 7. **Sends:** generate a UUIDv7 `clientMsgId`, show the bubble as pending, POST it, and on the response replace the pending bubble with the stored row (by `clientMsgId`). Retry with the same id on network failure. The push of your own message is then a duplicate.
+8. **First sight of a conversation:** on `resync`/`ready` the list includes each conversation's `lastDeliveredSeq` for me. A conversation the tab hasn't loaded starts at that marker and fetches only the undelivered messages, so delivery is acknowledged without loading whole histories. A push for a conversation the tab doesn't know yet (say, a brand-new DM) starts tracking it from zero and catches up.
+9. **Back online (`ready`):** besides the catch-up above, refresh the inbox and the member read markers, and resend every failed, retryable send with its same `clientMsgId`. The browser's `offline` event closes the socket at once (banner: offline) and `online` reconnects.
+10. **Multiple tabs and devices:** each tab has its own socket, engine and outbox, and they never coordinate. That is safe because the server is the only source of truth: sends are idempotent by id, read/delivered markers only move forward, and every tab receives every push for the user (rooms are per user). Unsent drafts belong to the tab that wrote them.
+
+The web implementation is `web/src/sync/sync.ts` (rules, unit-tested with a fake socket and server) and `web/src/realtime/client.ts` (socket, outbox, presence, typing, connection state).
 
 ## 7. Receipts, typing, presence
 

@@ -266,6 +266,33 @@ describe('SyncEngine', () => {
     expect(engine.messages('c1')).not.toBe(a);
   });
 
+  it('starts tracking a conversation it has never seen when a push arrives for it', async () => {
+    const { server, socket, engine } = setup();
+    server.send('fresh', 'first, before we knew about it');
+    socket.deliver('message:new', server.send('fresh', 'second'));
+    await engine.settled();
+    await tick();
+    expect(bodies(engine, 'fresh')).toEqual(['first, before we knew about it', 'second']);
+    expect(engine.get('fresh')).toMatchObject({ lastSeq: 2, changeCursor: 2 });
+    expect(socket.emitted).toContainEqual({ event: 'delivered', payload: { conversationId: 'fresh', seq: 2 } });
+  });
+
+  it('on first sight of a conversation, fetches and acks only what was never delivered', async () => {
+    const server = new FakeServer();
+    const socket = new FakeSocket();
+    const engine = new SyncEngine(server, socket, { ackDelayMs: 0 });
+    for (let i = 1; i <= 5; i++) server.send('c7', `m${String(i)}`);
+    const list = server.listConversations.bind(server);
+    server.listConversations = async () => (await list()).map((h) => ({ ...h, deliveredSeq: 3 }));
+    socket.deliver('ready');
+    await tick(20);
+    await engine.settled();
+    expect(server.calls).toEqual(['list', 'seq:c7>3']);
+    expect(bodies(engine, 'c7')).toEqual(['m4', 'm5']);
+    await tick();
+    expect(socket.emitted).toContainEqual({ event: 'delivered', payload: { conversationId: 'c7', seq: 5 } });
+  });
+
   it('treats a server resync like a reconnect', async () => {
     const { server, socket, engine } = setup();
     server.send('c1', 'lost while the server listener was down');

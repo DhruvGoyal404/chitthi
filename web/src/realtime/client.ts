@@ -30,7 +30,7 @@ function restApi(qc: QueryClient): SyncApi {
     async listConversations(): Promise<ConversationHead[]> {
       const { conversations } = await api<{ conversations: InboxEntry[] }>('/conversations');
       qc.setQueryData(['conversations'], conversations);
-      return conversations.map((c) => ({ id: c.id, lastSeq: c.lastSeq, changeSeq: c.changeSeq }));
+      return conversations.map((c) => ({ id: c.id, lastSeq: c.lastSeq, changeSeq: c.changeSeq, deliveredSeq: c.lastDeliveredSeq }));
     },
     async head(id): Promise<ConversationHead> {
       const { conversation } = await api<{ conversation: ConversationDetail }>(`/conversations/${id}`);
@@ -66,7 +66,14 @@ export class RealtimeClient {
     this.engine = new SyncEngine(restApi(qc), this.socket);
     const s = this.socket;
 
-    s.on('ready', () => { this.connection.set('live'); });
+    s.on('ready', () => {
+      this.connection.set('live');
+      // Back from a gap: the engine resyncs messages itself; refresh what else may have moved
+      // (inbox, member read markers) and resend what failed while away (same ids: idempotent).
+      this.refreshInbox();
+      void this.qc.invalidateQueries({ queryKey: ['conversation'] });
+      for (const p of this.outbox.retryable()) void this.retry(p.clientMsgId);
+    });
     s.on('disconnect', () => { this.connection.set(navigator.onLine ? 'reconnecting' : 'offline'); });
     s.on('connect_error', () => { this.connection.set(navigator.onLine ? 'reconnecting' : 'offline'); });
     s.on('resync', () => { this.refreshInbox(); });

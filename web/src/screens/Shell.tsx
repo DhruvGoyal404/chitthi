@@ -1,4 +1,5 @@
 import { Link, Navigate, Outlet, useMatch } from 'react-router';
+import { ConnectionBanner } from '../components/ConnectionBanner.js';
 import { Icon } from '../components/ui.js';
 import { RealtimeProvider } from '../realtime/RealtimeProvider.js';
 import { useMe } from '../session.js';
@@ -33,13 +34,16 @@ function EmptyPane() {
 function Layout() {
   const atInbox = useMatch('/') !== null;
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
+      <ConnectionBanner />
+      <div className="flex min-h-0 flex-1">
       <nav aria-label="Conversations" className={`${atInbox ? 'flex' : 'hidden'} min-h-0 w-full flex-col border-paper-edge md:flex md:w-[22rem] md:shrink-0 md:border-r`}>
         <Inbox />
       </nav>
       <main className={`${atInbox ? 'hidden' : 'flex'} min-h-0 min-w-0 flex-1 flex-col md:flex`}>
         {atInbox ? <EmptyPane /> : <Outlet />}
       </main>
+      </div>
     </div>
   );
 }
