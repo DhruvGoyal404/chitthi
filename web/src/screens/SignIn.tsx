@@ -46,6 +46,7 @@ export function SignIn() {
   const [params] = useSearchParams();
   const providers = useProviders();
   const error = signInError(params.get('error'), params.get('provider'));
+  const deleted = params.get('deleted') === '1';
   const offered = PROVIDERS.filter((p) => providers.data?.[p]);
 
   return (
@@ -61,6 +62,7 @@ export function SignIn() {
               <p className="text-sm text-ink-soft">Letters that arrive in order.</p>
             </div>
           </div>
+          {deleted && <p role="status" className="mb-4 rounded-md border border-paper-edge p-3 text-sm text-ink">Your account was deleted. Thank you for writing with Chitthi.</p>}
           {error && <p role="alert" className="mb-4 rounded-md border border-stamp p-3 text-sm text-ink">{error}</p>}
           {providers.isError && <p role="alert" className="mb-4 text-sm text-ink">Could not reach Chitthi. Try again.</p>}
           {offered.length > 0 && (

@@ -36,6 +36,7 @@ export function systemText(meta: Record<string, unknown> | null, nameOf: (id: un
     case 'member_added': return `${nameOf(meta.actor)} added ${nameOf(meta.target)}`;
     case 'member_removed': return `${nameOf(meta.actor)} removed ${nameOf(meta.target)}`;
     case 'member_left': return `${nameOf(meta.actor)} left`;
+    case 'owner_changed': return `${nameOf(meta.target)} is now the owner`;
     default: return 'Conversation updated';
   }
 }

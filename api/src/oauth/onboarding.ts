@@ -20,6 +20,7 @@ async function suggestHandle(pool: pg.Pool, email: string, name: string): Promis
     `SELECT c AS handle FROM unnest($1::text[]) WITH ORDINALITY AS t(c, n)
       WHERE NOT EXISTS (SELECT 1 FROM users u WHERE lower(u.handle) = lower(c))
         AND NOT EXISTS (SELECT 1 FROM reserved_handles r WHERE r.handle = lower(c))
+        AND NOT EXISTS (SELECT 1 FROM handle_holds h WHERE h.handle = lower(c) AND h.held_until > now())
       ORDER BY n LIMIT 1`,
     [candidates],
   );

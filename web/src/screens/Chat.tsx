@@ -79,9 +79,10 @@ function ChatView({ id }: { id: string }) {
         <p className="flex-1 p-6 text-center text-sm text-ink-soft">{conv.isError ? 'Could not open this conversation.' : 'Unfolding the letter…'}</p>
       )}
       <Composer key={editing?.id ?? 'new'}
-        disabled={!c?.myRole || c.block !== null}
+        disabled={!c?.myRole || c.block !== null || peer?.deleted === true}
         disabledReason={!c ? 'Loading…'
           : !c.myRole ? 'You left this group. You can read it, but not write.'
+          : peer?.deleted ? 'This account was deleted. You can still read your letters.'
           : c.block === 'by_me' ? 'You blocked this person. Unblock them in contact info to send messages.'
           : "You can't message this person."}
         editing={editing ? { body: editing.body ?? '' } : null}

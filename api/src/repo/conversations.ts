@@ -13,7 +13,7 @@ export const MAX_GROUP_MEMBERS = 256;
 const userNotFound = () => new HttpError(404, 'user_not_found', 'User not found');
 const forbidden = (message: string) => new HttpError(403, 'forbidden', message);
 
-async function insertSystemMessage(q: Queryable, conversationId: string, meta: Record<string, unknown>): Promise<number> {
+export async function insertSystemMessage(q: Queryable, conversationId: string, meta: Record<string, unknown>): Promise<number> {
   const { rows: [row] } = await q.query<{ seq: number }>(
     `INSERT INTO messages (conversation_id, kind, meta) VALUES ($1, 'system', $2) RETURNING seq`,
     [conversationId, JSON.stringify(meta)],
@@ -201,7 +201,7 @@ export type InboxEntry = {
   kind: 'direct' | 'group';
   title: string | null;
   /** The other participant of a direct conversation. */
-  peer: { id: string; handle: string; displayName: string } | null;
+  peer: { id: string; handle: string; displayName: string; deleted: boolean } | null;
   active: boolean;
   role: Role;
   lastSeq: number;
@@ -230,12 +230,12 @@ const unreadSql = (userParam: string) => `(SELECT count(*)::int FROM (
 
 /** Every conversation the user can read (active or read-only), most recent activity first. */
 export async function listConversations(pool: pg.Pool, userId: string, limit = 50): Promise<InboxEntry[]> {
-  const { rows } = await pool.query<InboxEntry & { peer_id: string | null; peer_handle: string | null; peer_name: string | null }>(
+  const { rows } = await pool.query<InboxEntry & { peer_id: string | null; peer_handle: string | null; peer_name: string | null; peer_deleted: boolean | null }>(
     `SELECT c.id, c.kind, c.title, c.last_seq AS "lastSeq", c.change_seq AS "changeSeq", c.last_message_at AS "lastMessageAt",
             p.left_at IS NULL AS active, p.role,
             r.last_read_seq AS "lastReadSeq", r.last_delivered_seq AS "lastDeliveredSeq",
             ${unreadSql('$1')} AS unread,
-            peer.id AS peer_id, peer.handle AS peer_handle, peer.display_name AS peer_name,
+            peer.id AS peer_id, peer.handle AS peer_handle, peer.display_name AS peer_name, peer.deleted_at IS NOT NULL AS peer_deleted,
             (SELECT json_build_object('seq', x.seq, 'senderId', x.sender_id, 'kind', x.kind, 'body', x.body,
                                       'meta', x.meta, 'deletedAt', x.deleted_at, 'createdAt', x.created_at)
                FROM messages x
@@ -251,9 +251,9 @@ export async function listConversations(pool: pg.Pool, userId: string, limit = 5
       LIMIT $2`,
     [userId, limit],
   );
-  return rows.map(({ peer_id, peer_handle, peer_name, ...e }) => ({
+  return rows.map(({ peer_id, peer_handle, peer_name, peer_deleted, ...e }) => ({
     ...e,
-    peer: peer_id && peer_handle ? { id: peer_id, handle: peer_handle, displayName: peer_name ?? peer_handle } : null,
+    peer: peer_id && peer_handle ? { id: peer_id, handle: peer_handle, displayName: peer_name ?? peer_handle, deleted: peer_deleted === true } : null,
   }));
 }
 
@@ -283,6 +283,8 @@ export type Member = {
   active: boolean;
   lastReadSeq: number;
   lastDeliveredSeq: number;
+  /** The account was deleted ("Deleted user"); its DMs take no new messages. */
+  deleted: boolean;
 };
 
 export type ConversationDetail = Conversation & {
@@ -310,7 +312,7 @@ export async function getConversation(pool: pg.Pool, conversationId: string, use
   const { rows: members } = await pool.query<Member>(
     `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName", p.role, p.joined_seq AS "joinedSeq",
             p.left_seq AS "leftSeq", p.left_at IS NULL AS active,
-            r.last_read_seq AS "lastReadSeq", r.last_delivered_seq AS "lastDeliveredSeq"
+            r.last_read_seq AS "lastReadSeq", r.last_delivered_seq AS "lastDeliveredSeq", u.deleted_at IS NOT NULL AS deleted
        FROM (SELECT DISTINCT ON (user_id) * FROM conversation_memberships
               WHERE conversation_id = $1 ORDER BY user_id, joined_seq DESC) p
        JOIN users u ON u.id = p.user_id

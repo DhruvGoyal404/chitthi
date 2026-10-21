@@ -124,6 +124,7 @@ export function ConversationInfo() {
         )}
         {c?.kind === 'direct' && (() => {
           const peer = c.members.find((m) => m.userId !== me.data?.id);
+          if (peer?.deleted) return <p className="text-sm text-ink-soft">This account was deleted.</p>;
           return peer && <BlockControl conversationId={id} peer={peer} blocked={c.block === 'by_me'} />;
         })()}
         {c?.kind === 'group' && c.myRole && (

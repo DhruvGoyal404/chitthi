@@ -49,6 +49,7 @@ export async function findOrCreateDevUser(pool: pg.Pool, handle: string): Promis
 export function mapUserError(err: unknown): unknown {
   if (isUniqueViolation(err, 'users_handle_lower_key')) return new HttpError(409, 'handle_taken', 'That handle is taken');
   if (violates(err, 'users_handle_reserved')) return new HttpError(400, 'handle_reserved', 'That handle is reserved');
+  if (violates(err, 'users_handle_held')) return new HttpError(409, 'handle_taken', 'That handle is taken');
   if (violates(err, 'users_handle_format')) return new HttpError(400, 'invalid_handle', 'Handles are 3–20 characters: letters, digits or _');
   return err;
 }

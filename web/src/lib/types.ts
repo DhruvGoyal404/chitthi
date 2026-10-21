@@ -13,7 +13,7 @@ export type InboxEntry = {
   id: string;
   kind: 'direct' | 'group';
   title: string | null;
-  peer: { id: string; handle: string; displayName: string } | null;
+  peer: { id: string; handle: string; displayName: string; deleted: boolean } | null;
   active: boolean;
   role: Role;
   lastSeq: number;
@@ -43,6 +43,8 @@ export type Member = {
   active: boolean;
   lastReadSeq: number;
   lastDeliveredSeq: number;
+  /** The account was deleted: shown as "Deleted user", takes no new messages, ignored by ticks. */
+  deleted: boolean;
 };
 
 export type ConversationDetail = {

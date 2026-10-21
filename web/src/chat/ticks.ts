@@ -8,17 +8,18 @@ import type { Member } from '../lib/types.js';
  *   delivered – every recipient's delivered marker has reached it (✓✓)
  *   read      – every recipient's read marker has reached it (postmark ✓✓)
  * Recipients are the other members whose current membership includes the message's seq. With no
- * recipients (alone in a group), a stored message stays "sent".
+ * recipients (alone in a group), a stored message stays "sent". Deleted accounts are not recipients:
+ * their markers never move again.
  */
 export type Tick = 'pending' | 'failed' | 'sent' | 'delivered' | 'read';
 
 export function tickFor(
   message: { seq: number; senderId: string | null } | { pending: 'pending' | 'failed' },
   meId: string,
-  members: readonly Pick<Member, 'userId' | 'active' | 'joinedSeq' | 'lastReadSeq' | 'lastDeliveredSeq'>[],
+  members: readonly (Pick<Member, 'userId' | 'active' | 'joinedSeq' | 'lastReadSeq' | 'lastDeliveredSeq'> & { deleted?: boolean })[],
 ): Tick {
   if ('pending' in message) return message.pending;
-  const recipients = members.filter((m) => m.userId !== meId && m.active && m.joinedSeq <= message.seq);
+  const recipients = members.filter((m) => m.userId !== meId && m.active && m.deleted !== true && m.joinedSeq <= message.seq);
   if (recipients.length === 0) return 'sent';
   if (recipients.every((m) => m.lastReadSeq >= message.seq)) return 'read';
   if (recipients.every((m) => m.lastDeliveredSeq >= message.seq)) return 'delivered';

@@ -103,6 +103,7 @@ export async function sendMessage(pool: pg.Pool, input: SendInput): Promise<Send
     }
     // Removed between the access check and the insert: the trigger re-checks under the lock.
     if (violates(err, 'messages_sender_active_member')) throw readOnly();
+    if (violates(err, 'messages_direct_deleted')) throw new HttpError(403, 'recipient_deleted', 'This account was deleted. It takes no new messages.');
     if (violates(err, 'messages_direct_blocked')) throw await directBlockError(pool, input.conversationId, input.senderId);
     throw err;
   }

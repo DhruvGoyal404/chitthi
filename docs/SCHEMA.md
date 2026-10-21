@@ -92,5 +92,11 @@ Phase 5 (sign-in and safety; [AUTH.md](AUTH.md) has the behaviour):
   - `user_blocks (blocker_id, blocked_id)`: no self-blocks; indexed both ways.
   - The trigger `messages_reject_blocked_direct` refuses a new text message, or an edit, in a direct conversation when either participant has blocked the other. It fires after `messages_before_insert` has taken the conversation lock, so a refused send rolls its seq back and leaves no gap. A block takes the same lock before it is inserted, so it and a concurrent send are strictly ordered.
   - `user_blocks_notify`: tells the realtime server, which hides or restores presence at once.
+- `20261022110000_account_deletion.sql`
+  - `users.deleted_at`: implies `disabled_at`.
+  - `handle_holds (handle, user_id, held_until)`, checked by the handle trigger: `users_handle_held`.
+  - `left_reason` gains `'deleted'`.
+  - The trigger `messages_reject_deleted_direct` refuses new messages in a DM with a deleted account.
+  - The app role may now `DELETE` identities.
 
 Phase 6: `attachments`, plus `messages.attachment_id`, which the delete trigger will also NULL.

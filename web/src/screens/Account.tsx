@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState, type SubmitEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
-import { Button, TopBar } from '../components/ui.js';
+import { Button, Field, TopBar } from '../components/ui.js';
 import { buttonClass } from '../components/styles.js';
-import { api } from '../lib/api.js';
+import { api, ApiError } from '../lib/api.js';
 import { linkError, PROVIDERS, providerName } from '../lib/authErrors.js';
 import type { BlockedUser, Identity } from '../lib/types.js';
-import { useProviders, useSignOut } from '../session.js';
+import { useMe, useProviders, useSignOut } from '../session.js';
 import { BackLink } from './Shell.js';
 
 function SignInMethods() {
@@ -71,6 +72,49 @@ function BlockedPeople() {
   );
 }
 
+/** Deleting the account: says exactly what happens, offers erasing messages, asks for the handle. */
+function DeleteAccount() {
+  const me = useMe();
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [erase, setErase] = useState(false);
+  const [confirm, setConfirm] = useState('');
+  const remove = useMutation({
+    mutationFn: () => api('/me', { method: 'DELETE', body: { confirmHandle: confirm.trim(), eraseMessages: erase } }),
+    onSuccess: () => {
+      qc.clear();
+      qc.setQueryData(['me'], null);
+      void navigate('/signin?deleted=1', { replace: true });
+    },
+  });
+  const handle = me.data?.handle ?? '';
+  const onSubmit = (e: SubmitEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    remove.mutate();
+  };
+  return (
+    <form onSubmit={onSubmit} className="space-y-3 rounded-md border border-stamp p-3" aria-labelledby="delete-h">
+      <h2 id="delete-h" className="text-sm font-medium text-ink">Delete account</h2>
+      <ul className="list-disc space-y-1 pl-5 text-sm text-ink">
+        <li>You are signed out everywhere, and your sign-in methods and blocks are removed.</li>
+        <li>You leave every group. Groups you own pass to an admin, or else the longest-standing member.</li>
+        <li>Your letters stay for the people you wrote to, signed "Deleted user". Chats with you take no new messages.</li>
+        <li>Your handle stays unavailable to anyone else for 30 days.</li>
+      </ul>
+      <label className="flex min-h-11 items-start gap-3 text-sm text-ink">
+        <input type="checkbox" checked={erase} onChange={(e) => { setErase(e.target.checked); }} className="mt-0.5 h-4 w-4 accent-[var(--seal)]" />
+        <span>Also erase every message I sent. They will show as "message deleted" for everyone.</span>
+      </label>
+      <Field id="confirm-handle" label={`Type your handle (${handle}) to confirm`} value={confirm} autoComplete="off" autoCapitalize="none" spellCheck={false}
+        error={remove.error ? (remove.error instanceof ApiError ? remove.error.message : 'Could not delete the account. Try again.') : undefined}
+        onChange={(e) => { setConfirm(e.target.value); }} />
+      <Button type="submit" variant="danger" disabled={remove.isPending || confirm.trim().toLowerCase() !== handle.toLowerCase() || !handle}>
+        {remove.isPending ? 'Deleting…' : 'Delete my account'}
+      </Button>
+    </form>
+  );
+}
+
 export function Account() {
   const navigate = useNavigate();
   const signOutEverywhere = useSignOut(true);
@@ -89,6 +133,7 @@ export function Account() {
             Sign out everywhere
           </Button>
         </section>
+        <DeleteAccount />
       </div>
     </section>
   );

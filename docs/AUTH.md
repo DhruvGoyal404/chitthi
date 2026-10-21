@@ -110,3 +110,28 @@ What a block does, in every path (REST and socket), tested in [`api/test/blocks.
 - Every member reads the same `seq` sequence. Holes for one reader would break the gap-free model ([SCHEMA.md](SCHEMA.md)).
 - What a block protects against is *new contact*: DMs, being added to groups, being found, and being watched (presence, typing). All of that is enforced.
 - To get away from someone in a group, leave it, or ask an admin to remove them.
+
+## Deleting an account
+
+From the Account page. The page lists exactly what happens and asks for the handle to be typed again. `DELETE /api/me {confirmHandle, eraseMessages}` does it all in one transaction ([`api/src/repo/account.ts`](../api/src/repo/account.ts)):
+
+- **Sessions and sockets.** The account is disabled, so every socket disconnects at once (the existing `users_notify_disabled` trigger). Its sessions, identities, blocks (both ways) and in-progress OAuth flows are deleted.
+- **The profile is emptied, not removed.** Messages, memberships and read markers point at the user row, so it stays:
+  - the handle becomes `del_<random hex>`;
+  - the name becomes "Deleted user";
+  - the avatar is cleared;
+  - `deleted_at` is set.
+- **Groups.** Every active group membership closes with `left_reason = 'deleted'`, after a `member_left` notice, so the window ends exactly there. A group the user owned passes to the longest-standing admin, or else the longest-standing member, with an `owner_changed` notice.
+- **Direct conversations** keep both members, so the other person keeps the whole history. The database refuses new messages there (`messages_reject_deleted_direct`, under the conversation lock: no seq gap), and the UI says why. A new DM with a deleted account can't be started.
+- **Messages** stay for everyone else by default, with the author shown as "Deleted user".
+- **Erasing messages (opt-in).** With `eraseMessages`, every text message the user sent becomes a tombstone, exactly as delete-for-everyone does: the body and its hash are erased, while the row and its seq stay. Open chats see it live as an edit.
+- **The handle is held for 30 days** in `handle_holds`, which the handle trigger checks, so nobody can take over the name and pass as the person who just left. Someone trying it gets the ordinary "That handle is taken", which doesn't reveal that the account was deleted.
+- **Tick calculations** ignore deleted accounts.
+
+**Invariants still hold**, as tested in [`api/test/account.db.test.ts`](../api/test/account.db.test.ts):
+
+- seqs stay `1..last_seq` with no gaps in every affected conversation;
+- unread counts match the definition, recomputed from the rows, for everyone who remains;
+- the deleted member's window ends at its `member_left` notice.
+
+Signing in again with the same Google or GitHub account afterwards starts a brand-new account; nothing links it to the deleted one.

@@ -2,8 +2,9 @@ import { Router, type RequestHandler, type Response } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
 import { HttpError } from './errors.js';
+import { deleteAccount } from './repo/account.js';
 import { getUser, updateProfile } from './repo/users.js';
-import { sessionToken, type Session, type SessionStore } from './sessions.js';
+import { SESSION_COOKIE, sessionToken, type Session, type SessionStore } from './sessions.js';
 
 /** 401 unless the request carries a live session cookie; the session is kept in res.locals. */
 export function requireSession(store: SessionStore): RequestHandler {
@@ -29,6 +30,13 @@ const profilePatch = z
   })
   .refine((p) => p.handle !== undefined || p.displayName !== undefined, 'nothing to change');
 
+const deleteBody = z.object({
+  /** The account's handle, typed again: deletion can't happen by a stray click. */
+  confirmHandle: z.string().trim().min(1),
+  /** Also erase the body of every message I sent (they stay as "deleted" for everyone). */
+  eraseMessages: z.boolean().default(false),
+});
+
 export function meRouter(pool: pg.Pool, store: SessionStore): Router {
   const router = Router();
   router.get('/me', requireSession(store), async (_req, res) => {
@@ -44,6 +52,17 @@ export function meRouter(pool: pg.Pool, store: SessionStore): Router {
         ...(patch.displayName !== undefined && { displayName: patch.displayName }),
       }),
     });
+  });
+  // Account deletion. Signs this browser out; the database trigger disconnects every socket.
+  router.delete('/me', requireSession(store), async (req, res) => {
+    const { confirmHandle, eraseMessages } = deleteBody.parse(req.body);
+    const session = sessionOf(res);
+    if (confirmHandle.toLowerCase() !== session.user.handle.toLowerCase()) {
+      throw new HttpError(400, 'confirmation_mismatch', 'Type your handle exactly to confirm.');
+    }
+    const result = await deleteAccount(pool, session.user.id, { eraseMessages });
+    res.clearCookie(SESSION_COOKIE, { path: '/' });
+    res.json({ deleted: true, ...result });
   });
   return router;
 }
