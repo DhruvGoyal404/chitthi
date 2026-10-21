@@ -8,7 +8,8 @@ import { performance } from 'node:perf_hooks';
 export class StageTimer {
   readonly stages: Record<string, number> = {};
   private last = performance.now();
-  private readonly start = this.last;
+  /** performance.now() when the timer was created (the send route was reached). */
+  readonly start = this.last;
 
   mark(stage: string): void {
     const now = performance.now();
@@ -28,9 +29,9 @@ export class StageTimer {
  * for the most recent sends, in memory, for tests and diagnostics; never persisted or logged
  * with content (ids and durations only).
  */
-export type SendTrace = { messageId: string; rest: Record<string, number>; notifyMs: number; queueMs: number; readMs: number; emitMs: number; emittedAt: number };
+export type SendTrace = { messageId: string; restStartedAt: number; rest: Record<string, number>; notifyMs: number; queueMs: number; readMs: number; emitMs: number; emittedAt: number };
 
-type RestHalf = { committedAt: number; rest: Record<string, number> };
+type RestHalf = { startedAt: number; committedAt: number; rest: Record<string, number> };
 type FanoutHalf = { receivedAt: number; startedAt: number; readAt: number; emittedAt: number };
 
 const MAX = 2_000;
@@ -44,6 +45,7 @@ function settle(messageId: string): void {
   const { rest, fanout } = h;
   traces.push({
     messageId,
+    restStartedAt: rest.startedAt,
     rest: rest.rest,
     // Can be slightly negative: the NOTIFY may reach the listener before the COMMIT reply is processed.
     notifyMs: fanout.receivedAt - rest.committedAt,
@@ -69,8 +71,8 @@ function half(messageId: string) {
   return h;
 }
 
-export function traceCommit(messageId: string, rest: Record<string, number>): void {
-  half(messageId).rest = { committedAt: performance.now(), rest: { ...rest } };
+export function traceCommit(messageId: string, timer: StageTimer): void {
+  half(messageId).rest = { startedAt: timer.start, committedAt: performance.now(), rest: { ...timer.stages } };
   settle(messageId);
 }
 

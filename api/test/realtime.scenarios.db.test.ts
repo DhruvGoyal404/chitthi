@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { monitorEventLoopDelay, PerformanceObserver } from 'node:perf_hooks';
 import type { Socket } from 'socket.io-client';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import type { MessageEvent } from '../src/realtime/fanout.js';
@@ -234,6 +234,9 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
     const idOf = new Map<number, string>();
     const loop = monitorEventLoopDelay({ resolution: 5 });
     loop.enable();
+    const gcs: { start: number; ms: number }[] = [];
+    const gcObserver = new PerformanceObserver((list) => { for (const e of list.getEntries()) gcs.push({ start: e.startTime, ms: e.duration }); });
+    gcObserver.observe({ entryTypes: ['gc'] });
     for (const s of sockets) {
       s.on('message:new', (e: MessageEvent) => {
         if (e.conversationId !== gid) return;
@@ -269,6 +272,7 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
     };
     process.stderr.write(`\nLATENCY ${JSON.stringify(report)}\n`);
     loop.disable();
+    gcObserver.disconnect();
 
     // Where the time goes (docs/REALTIME.md, "Measured latency"): every stage of each send, then
     // emit -> first and -> last of the 200 sockets (these clients share the server's event loop).
@@ -278,6 +282,7 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
     for (const [seq, id] of idOf) {
       const t = traces.get(id);
       if (!t) continue;
+      add('request', t.restStartedAt - (sentAt.get(seq) ?? NaN));
       for (const [stage, ms] of Object.entries(t.rest)) add(`rest.${stage}`, ms);
       add('notify', t.notifyMs);
       add('queue', t.queueMs);
@@ -291,6 +296,23 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
     const ms = (ns: number) => Math.round(ns / 1e4) / 100;
     const eventLoop = { p50: ms(loop.percentile(50)), p99: ms(loop.percentile(99)), max: ms(loop.max) };
     process.stderr.write(`STAGES ${JSON.stringify({ stages, eventLoopDelayMs: eventLoop })}\n`);
+    // p99 over 5000 deliveries is set by the slowest single message (200 deliveries each), so
+    // print that message's own breakdown: which stage a one-off stall landed in.
+    const round = (x: number) => Math.round(x * 10) / 10;
+    const worst = [...idOf].map(([seq, id], index) => ({ index, seq, totalMs: (lastAt.get(seq) ?? NaN) - (sentAt.get(seq) ?? NaN), t: traces.get(id) }))
+      .sort((x, y) => y.totalMs - x.totalMs)[0];
+    if (worst?.t) {
+      const { t } = worst;
+      process.stderr.write(`WORST ${JSON.stringify({
+        index: worst.index, totalMs: round(worst.totalMs),
+        request: round(t.restStartedAt - (sentAt.get(worst.seq) ?? NaN)),
+        rest: Object.fromEntries(Object.entries(t.rest).map(([k, v]) => [k, round(v)])),
+        notify: round(t.notifyMs), queue: round(t.queueMs), read: round(t.readMs), emit: round(t.emitMs),
+        emitToLastSocket: round((lastAt.get(worst.seq) ?? NaN) - t.emittedAt),
+        gcPausesInWindowMs: gcs.filter((g) => g.start + g.ms >= (sentAt.get(worst.seq) ?? 0) && g.start <= (lastAt.get(worst.seq) ?? 0)).map((g) => round(g.ms)),
+        gcMaxMs: round(Math.max(0, ...gcs.map((g) => g.ms))),
+      })}\n`);
+    }
     expect(report.sendToDeliveryMs.p95).toBeLessThan(1_000);
     for (const s of sockets) s.disconnect();
   }, 120_000);

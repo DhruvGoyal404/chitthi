@@ -153,7 +153,7 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
     timer?.mark('validate');
     const { message, duplicate } = await sendMessage(pool, { conversationId, senderId: me(res), clientMsgId, body }, timer);
     if (timer) {
-      if (!duplicate) traceCommit(message.id, timer.stages);
+      if (!duplicate) traceCommit(message.id, timer);
       res.set('Server-Timing', timer.serverTiming());
     }
     res.status(duplicate ? 200 : 201).json({ message, duplicate });
