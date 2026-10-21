@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { MSG_COLUMNS, type Message } from '../repo/messages.js';
+import { traceFanout } from '../timing.js';
 import { userRoom, type Realtime } from './server.js';
 
 export const CONV_CHANNEL = 'chitthi_conv';
@@ -22,10 +23,11 @@ const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isSaf
 export function attachFanout(realtime: Realtime, pool: pg.Pool): void {
   const { io } = realtime;
 
-  realtime.onChannel(CONV_CHANNEL, async (p) => {
+  realtime.onChannel(CONV_CHANNEL, async (p, { receivedAt }) => {
     const kind = p.kind;
     if (kind !== 'message_new' && kind !== 'message_updated') return;
     if (!isString(p.conversation_id) || !isString(p.message_id) || !isInt(p.seq) || !isInt(p.change_seq)) return;
+    const startedAt = performance.now();
 
     const { rows: [row] } = await pool.query<{ message: Message; recipients: string[] }>(
       `SELECT to_jsonb(x) AS message,
@@ -35,8 +37,10 @@ export function attachFanout(realtime: Realtime, pool: pg.Pool): void {
       [p.message_id, p.conversation_id, p.seq],
     );
     if (!row || row.recipients.length === 0) return;
+    const readAt = performance.now();
     const event: MessageEvent = { conversationId: p.conversation_id, seq: p.seq, changeSeq: p.change_seq, message: row.message };
     io.to(row.recipients.map(userRoom)).emit(kind === 'message_new' ? 'message:new' : 'message:updated', event);
+    if (kind === 'message_new') traceFanout(p.message_id, { receivedAt, startedAt, readAt, emittedAt: performance.now() });
   });
 
   // Notifications sent while the listener was down are gone: every client catches up over REST.

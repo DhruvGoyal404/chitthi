@@ -68,7 +68,7 @@ Server → client:
 | `ready` | `{userId}` | Rooms are joined. |
 | `message:new` | `{conversationId, seq, changeSeq, message}` | `changeSeq` is the change value this event consumed. `message` is the stored row, which may be a newer version. |
 | `message:updated` | same | An edit, or a delete-for-everyone (`message.body: null`, `deletedAt` set). |
-| `read:updated` / `delivered:updated` | `{conversationId, userId, seq}` | Markers only move forward. |
+| `read:updated` / `delivered:updated` | `{conversationId, userId, seq}` | Markers only move forward. `read:updated` also means delivered up to `seq`; `delivered:updated` is sent only when delivery moves on its own. |
 | `typing` | `{conversationId, userId, typing, ttlMs}` | Ephemeral. Treat `typing: true` as expiring after `ttlMs` unless refreshed. |
 | `presence` | `{userId, online, lastSeenAt}` | Only about users who share an active conversation with you. |
 | `presence:snapshot` | `{users: [...]}` | Sent once per socket after `ready`: the full set the user may see. |
@@ -137,14 +137,64 @@ The web implementation is `web/src/sync/sync.ts` (rules, unit-tested with a fake
 
 ## 10. Measured latency
 
-200 sockets (100 members × 2 tabs) in one group, 25 messages, 5000 deliveries. Local run: Postgres 18 in Docker Desktop (WSL2, 256 MB cap), API and clients in one Node process.
+**The test.** 200 sockets (100 members × 2 tabs) in one group, 25 messages, 5000 deliveries. Clients, API and listener all run in one Node process. Postgres 18 runs in Docker: locally that is Docker Desktop (WSL2, 256 MB cap); in CI, a service container.
 
-| | p50 | p95 | p99 |
-|---|---|---|---|
-| send start → delivered (REST round trip + fan-out) | ~50–60 ms | ~70–110 ms | ~70–115 ms |
-| REST response (commit acknowledged) → delivered | ~15 ms | ~20–30 ms | – |
+**What the test prints.** Each send is timed stage by stage, and the test prints a `STAGES` line next to `LATENCY`:
 
-The test asserts only p95 < 1 s; the numbers vary per run and machine. Most of the end-to-end time is the REST send itself: session lookup, rate limit, membership check and the insert transaction.
+- **REST stages.** [`api/src/timing.ts`](../api/src/timing.ts) records, per send:
+  - session lookup;
+  - rate-limit check;
+  - validation;
+  - idempotency lookup;
+  - membership check;
+  - pool wait;
+  - transaction;
+  - commit.
+
+  The same breakdown is returned to the client as a `Server-Timing` header.
+- **Fan-out stages.** In the same process: commit → NOTIFY received, the wait in the ordered queue, the row read, the emit, and emit → first and → last socket.
+- **Event-loop delay** (`monitorEventLoopDelay`).
+
+### The unexplained p99 (Phase 5)
+
+CI had shown send → delivery p99 ≈ 356 ms, against a p50 of about 8 ms in the same run.
+
+**Measured locally, before the fix** (three runs):
+
+- p99 was 235–250 ms;
+- event-loop stalls reached 66–83 ms;
+- the `transaction` stage's maximum was 62–76 ms, against a median of 12 ms.
+
+**The database was not the cause:**
+
+- pool wait stayed ≤ 0.2 ms;
+- commit → NOTIFY took about 1–5 ms;
+- the queue wait was ≤ 0.4 ms.
+
+The slow transactions were waiting for the event loop to run their query callbacks.
+
+**What was blocking the loop.** For every send, the server broadcast to all 200 sockets **three** times: `message:new`, then `read:updated` and `delivered:updated`. The last two exist because sending moves the sender's own read and delivered markers. Each broadcast costs 15–30 ms of synchronous `emit`, plus the same again on the 200 in-process clients that parse it. The next send then queued behind that work.
+
+**Fix 1: the redundant receipt is gone.** `read:updated` already implies delivered up to the same seq (the web client applies both). So when both markers move together to the same seq, as on every send, only `read:updated` is sent. `api/test/realtime.events.db.test.ts` pins this. A delivered-only move, from a client's `delivered` ack, still sends `delivered:updated`.
+
+**Fix 2: the two send limits run concurrently.** The burst and sustained windows used to be checked one after the other; now they are checked at the same time.
+
+**After the fixes** (three runs, same machine):
+
+| | Before | After |
+|---|---|---|
+| p99 send → delivery | 235–250 ms | 165–192 ms |
+| Event-loop stall (max) | 66–83 ms | 39–49 ms |
+| `transaction` stage (max) | 62–76 ms | 34–41 ms |
+
+**What remains is expected, and specific to this test.**
+
+- **Shared event loop.** Every message is one synchronous broadcast to 200 sockets, about 15–30 ms. The 200 clients then receive it in the same process, another 15–35 ms. Messages that arrive during that window wait.
+- **Production is different.** The server's loop doesn't run the clients, so this stage shrinks to the emit alone.
+- **REST path.** At the median it is about 40 ms locally and much less in CI. It is six round trips, each 3–6 ms on Docker Desktop: session, rate limits, idempotency, membership, transaction, commit.
+- **Not done: merging the idempotency and membership lookups** into one query. That would save one round trip (about 3–5 ms) and is a possible later optimisation, not a tail fix.
+
+The test asserts only p95 < 1 s. The numbers vary by run and by machine.
 
 ## 11. A second API instance
 

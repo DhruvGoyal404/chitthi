@@ -18,7 +18,8 @@ export type ChitthiServer = Server<DefaultEventsMap, DefaultEventsMap, DefaultEv
 /** An inbound event handler. `ack` is the client's callback, if it sent one. */
 export type InboundHandler = (socket: ChitthiSocket, payload: unknown, ack: ((result: unknown) => void) | undefined) => Promise<void>;
 /** Handles one notification from a channel, in commit order with every other notification. */
-export type ChannelHandler = (payload: Record<string, unknown>) => Promise<void>;
+/** `receivedAt`: performance.now() when the listener delivered the notification (before queueing). */
+export type ChannelHandler = (payload: Record<string, unknown>, meta: { receivedAt: number }) => Promise<void>;
 
 export const userRoom = (userId: string) => `user:${userId}`;
 const sessionRoom = (sessionId: string) => `session:${sessionId}`;
@@ -196,7 +197,8 @@ export function createRealtime(opts: RealtimeOptions): Realtime {
   }
 
   const onNotification = ({ channel, payload }: { channel: string; payload: Record<string, unknown> }) => {
-    for (const h of channelHandlers.get(channel) ?? []) enqueue(channel, () => h(payload));
+    const meta = { receivedAt: performance.now() };
+    for (const h of channelHandlers.get(channel) ?? []) enqueue(channel, () => h(payload, meta));
   };
   const onListenerResync = () => { enqueue('resync', resync); };
   listener.on('notification', onNotification);

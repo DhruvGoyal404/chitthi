@@ -4,6 +4,7 @@ import { HttpError } from '../errors.js';
 import { assertUuid, readOnly, requireActive, requireReader, visibleTo } from './access.js';
 import { directBlockError } from './blocks.js';
 import { isUniqueViolation, violates, withTx } from './pg.js';
+import type { StageTimer } from '../timing.js';
 import { codePointLength } from './text.js';
 
 export type Message = {
@@ -55,11 +56,12 @@ export type SendResult = { message: Message; duplicate: boolean };
  * trigger. A concurrent duplicate fails on messages_sender_client_key, its transaction (seq
  * increment included) rolls back, and the original is returned, so there is never a gap.
  */
-export async function sendMessage(pool: pg.Pool, input: SendInput): Promise<SendResult> {
+export async function sendMessage(pool: pg.Pool, input: SendInput, timer?: StageTimer): Promise<SendResult> {
   assertUuid(input.conversationId, 'Conversation');
   assertUuid(input.clientMsgId, 'clientMsgId', 400);
   const body = validateBody(input.body);
   const hash = sha256(body);
+  timer?.mark('validate');
 
   const resolveExisting = async (): Promise<SendResult | undefined> => {
     const { rows: [row] } = await pool.query<Message & { hash: Buffer | null }>(
@@ -76,8 +78,10 @@ export async function sendMessage(pool: pg.Pool, input: SendInput): Promise<Send
   };
 
   const existing = await resolveExisting();
+  timer?.mark('idempotency');
   if (existing) return existing;
   await requireActive(pool, input.conversationId, input.senderId);
+  timer?.mark('access');
 
   try {
     const message = await withTx(pool, async (tx) => {
@@ -94,7 +98,7 @@ export async function sendMessage(pool: pg.Pool, input: SendInput): Promise<Send
         [input.conversationId, input.senderId, row.seq],
       );
       return row;
-    });
+    }, timer);
     return { message, duplicate: false };
   } catch (err) {
     if (isUniqueViolation(err, 'messages_sender_client_key')) {

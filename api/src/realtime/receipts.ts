@@ -49,6 +49,9 @@ export function attachReceipts(realtime: Realtime, pool: pg.Pool): void {
     const rooms = [...new Set([p.user_id, ...rows.map((r) => r.user_id)])].map(userRoom);
     const base = { conversationId: p.conversation_id, userId: p.user_id };
     if (p.read_moved === true) realtime.io.to(rooms).emit('read:updated', { ...base, seq: p.read_seq } satisfies ReceiptEvent);
-    if (p.delivered_moved === true) realtime.io.to(rooms).emit('delivered:updated', { ...base, seq: p.delivered_seq } satisfies ReceiptEvent);
+    // read:updated means delivered up to the same seq too (clients apply both). So when the two
+    // moved together to the same place, as every send does for the sender, one broadcast is enough.
+    const coveredByRead = p.read_moved === true && p.read_seq === p.delivered_seq;
+    if (p.delivered_moved === true && !coveredByRead) realtime.io.to(rooms).emit('delivered:updated', { ...base, seq: p.delivered_seq } satisfies ReceiptEvent);
   });
 }

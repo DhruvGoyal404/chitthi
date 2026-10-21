@@ -1,14 +1,21 @@
 import pg from 'pg';
+import type { StageTimer } from '../timing.js';
 
 export type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
 
-/** Runs `fn` in a READ COMMITTED transaction on one connection; rolls back on any error. */
-export async function withTx<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+/**
+ * Runs `fn` in a READ COMMITTED transaction on one connection; rolls back on any error. With a
+ * timer, marks pool_wait (getting a connection), transaction (BEGIN + fn) and commit.
+ */
+export async function withTx<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => Promise<T>, timer?: StageTimer): Promise<T> {
   const client = await pool.connect();
+  timer?.mark('pool_wait');
   try {
     await client.query('BEGIN');
     const result = await fn(client);
+    timer?.mark('transaction');
     await client.query('COMMIT');
+    timer?.mark('commit');
     return result;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);

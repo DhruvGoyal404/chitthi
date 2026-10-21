@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { Socket } from 'socket.io-client';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import type { MessageEvent } from '../src/realtime/fanout.js';
 import type { PresenceEvent } from '../src/realtime/presence.js';
 import type { TypingEvent } from '../src/realtime/typing.js';
+import { sendTraces } from '../src/timing.js';
 import { as, signIn, type Signed } from './apphelpers.js';
 import { adminPool, appPool } from './dbhelpers.js';
 import { connect, next, record, sleep, startTestServer, waitUntil, type TestServer } from './sockets.js';
@@ -227,10 +229,17 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
     const latencies: number[] = [];
     const commitLatencies: number[] = [];
     let delivered = 0;
+    const firstAt = new Map<number, number>();
+    const lastAt = new Map<number, number>();
+    const idOf = new Map<number, string>();
+    const loop = monitorEventLoopDelay({ resolution: 5 });
+    loop.enable();
     for (const s of sockets) {
       s.on('message:new', (e: MessageEvent) => {
         if (e.conversationId !== gid) return;
         const now = performance.now();
+        if (!firstAt.has(e.seq)) firstAt.set(e.seq, now);
+        lastAt.set(e.seq, now);
         const t0 = sentAt.get(e.seq);
         const t1 = ackAt.get(e.seq);
         if (t0 !== undefined) latencies.push(now - t0);
@@ -242,7 +251,7 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
       const t0 = performance.now();
       const seq = i + 2; // seq 1 is group_created
       sentAt.set(seq, t0);
-      await send(sender, gid, `ping ${String(i)}`);
+      idOf.set(seq, (await send(sender, gid, `ping ${String(i)}`)).id);
       ackAt.set(seq, performance.now());
       await sleep(40);
     }
@@ -259,6 +268,29 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
       ackToDeliveryMs: { p50: pct(commitLatencies, 50), p95: pct(commitLatencies, 95) },
     };
     process.stderr.write(`\nLATENCY ${JSON.stringify(report)}\n`);
+    loop.disable();
+
+    // Where the time goes (docs/REALTIME.md, "Measured latency"): every stage of each send, then
+    // emit -> first and -> last of the 200 sockets (these clients share the server's event loop).
+    const traces = new Map(sendTraces().map((t) => [t.messageId, t]));
+    const series: Record<string, number[]> = {};
+    const add = (k: string, v: number) => { (series[k] ??= []).push(v); };
+    for (const [seq, id] of idOf) {
+      const t = traces.get(id);
+      if (!t) continue;
+      for (const [stage, ms] of Object.entries(t.rest)) add(`rest.${stage}`, ms);
+      add('notify', t.notifyMs);
+      add('queue', t.queueMs);
+      add('read', t.readMs);
+      add('emit', t.emitMs);
+      add('emitToFirstSocket', (firstAt.get(seq) ?? NaN) - t.emittedAt);
+      add('emitToLastSocket', (lastAt.get(seq) ?? NaN) - t.emittedAt);
+    }
+    expect(series.notify?.length).toBe(N); // every send traced end to end
+    const stages = Object.fromEntries(Object.entries(series).map(([k, v]) => [k, { p50: pct(v, 50), p95: pct(v, 95), max: pct(v, 100) }]));
+    const ms = (ns: number) => Math.round(ns / 1e4) / 100;
+    const eventLoop = { p50: ms(loop.percentile(50)), p99: ms(loop.percentile(99)), max: ms(loop.max) };
+    process.stderr.write(`STAGES ${JSON.stringify({ stages, eventLoopDelayMs: eventLoop })}\n`);
     expect(report.sendToDeliveryMs.p95).toBeLessThan(1_000);
     for (const s of sockets) s.disconnect();
   }, 120_000);

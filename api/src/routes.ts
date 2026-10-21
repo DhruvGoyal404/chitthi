@@ -11,6 +11,7 @@ import {
   catchUpByChange, catchUpBySeq, deleteForEveryone, editMessage, history, markRead, MAX_PAGE, messageReceipts, sendMessage,
 } from './repo/messages.js';
 import { block, listBlocked, unblock } from './repo/blocks.js';
+import { StageTimer, traceCommit } from './timing.js';
 import { findUserByHandle, searchUsers } from './repo/users.js';
 import type { SessionStore } from './sessions.js';
 
@@ -47,11 +48,20 @@ const me = (res: Response) => sessionOf(res).user.id;
  */
 export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: RateLimits): Router {
   const r = Router();
+  // Sends are timed stage by stage from here (docs/REALTIME.md, "Measured latency").
+  r.post('/conversations/:id/messages', (_req, res, next) => {
+    res.locals.timer = new StageTimer();
+    next();
+  });
   r.use(['/conversations', '/users', '/blocks'], requireSession(sessions));
   // Burst first: a quick flurry is stopped by the short window without draining the long one.
+  const timerOf = (res: Response) => res.locals.timer as StageTimer | undefined;
   const sendLimit: RequestHandler = async (_req, res, next) => {
-    await rateLimits.sendBurst(me(res));
-    await rateLimits.send(me(res));
+    timerOf(res)?.mark('session');
+    // Both windows in one round trip's time. A send refused by one still counts in the other,
+    // which only matters to someone already at a limit.
+    await Promise.all([rateLimits.sendBurst(me(res)), rateLimits.send(me(res))]);
+    timerOf(res)?.mark('rate_limit');
     next();
   };
   const searchLimit = limitBy(rateLimits.search, (_req, res) => me(res));
@@ -139,7 +149,13 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
   r.post('/conversations/:id/messages', sendLimit, async (req, res) => {
     const conversationId = pathId(req.params.id, 'Conversation');
     const { clientMsgId, body } = sendBody.parse(req.body);
-    const { message, duplicate } = await sendMessage(pool, { conversationId, senderId: me(res), clientMsgId, body });
+    const timer = timerOf(res);
+    timer?.mark('validate');
+    const { message, duplicate } = await sendMessage(pool, { conversationId, senderId: me(res), clientMsgId, body }, timer);
+    if (timer) {
+      if (!duplicate) traceCommit(message.id, timer.stages);
+      res.set('Server-Timing', timer.serverTiming());
+    }
     res.status(duplicate ? 200 : 201).json({ message, duplicate });
   });
 

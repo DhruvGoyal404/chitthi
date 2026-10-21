@@ -31,6 +31,20 @@ describe.skipIf(!apiUrl)('receipts, delivered-acks and typing', () => {
   }
   const send = (u: Signed, id: string, body = 'hi') => as(server.url, u).post(`/conversations/${id}/messages`, { clientMsgId: randomUUID(), body });
 
+  it('a send moves the sender\'s markers with one read:updated (it implies delivered); no separate delivered:updated', async () => {
+    const { a, b, id } = await dm();
+    const [as1, bs1] = await Promise.all([connect(server, a), connect(server, b)]);
+    const delivered = record<ReceiptEvent>(bs1, 'delivered:updated');
+    const read = next<ReceiptEvent>(bs1, 'read:updated', (e) => e.userId === a.id);
+    const ownTab = next<ReceiptEvent>(as1, 'read:updated', (e) => e.userId === a.id);
+    const seq = (await send(a, id)).body.message.seq as number;
+    expect(await read).toEqual({ conversationId: id, userId: a.id, seq });
+    expect((await ownTab).seq).toBe(seq);
+    await server.realtime.idle();
+    expect(delivered).toEqual([]);
+    for (const s of [as1, bs1]) s.disconnect();
+  });
+
   it('pushes read:updated to the reader\'s other tabs and to the other member', async () => {
     const { a, b, id } = await dm();
     await send(a, id);
