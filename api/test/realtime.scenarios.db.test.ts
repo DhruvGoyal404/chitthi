@@ -216,7 +216,15 @@ describe.skipIf(!apiUrl)('real-time delivery, end to end', () => {
     const members = await Promise.all(Array.from({ length: 100 }, () => signIn(server.url, 'lat')));
     const sender = await signIn(server.url, 'lat');
     const gid = (await api(sender).post('/conversations', { title: 'Latency', memberIds: members.map((m) => m.id) })).body.conversation.id as string;
-    const sockets = (await Promise.all(members.map(async (m) => [await connect(server, m), await connect(server, m)]))).flat();
+    // Connect in waves of 20 users. All 200 at once is an O(N²) presence burst (each user coming
+    // online is announced to its 100 group-mates and gets a snapshot of them): about 3 s on a
+    // laptop, and with parallel test files the last sockets could exceed the 5 s ready timeout.
+    // The burst is setup here, not what this test measures.
+    const sockets: Awaited<ReturnType<typeof connect>>[] = [];
+    for (let i = 0; i < members.length; i += 20) {
+      const wave = members.slice(i, i + 20);
+      sockets.push(...(await Promise.all(wave.map(async (m) => [await connect(server, m), await connect(server, m)]))).flat());
+    }
     expect(sockets).toHaveLength(200);
     // Measure steady state: let the setup burst (200 connects, snapshots, the group's presence
     // introduction) finish first. The clients share this process with the server.
