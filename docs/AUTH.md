@@ -135,3 +135,22 @@ From the Account page. The page lists exactly what happens and asks for the hand
 - the deleted member's window ends at its `member_left` notice.
 
 Signing in again with the same Google or GitHub account afterwards starts a brand-new account; nothing links it to the deleted one.
+
+## Security headers and CSP
+
+- **API.** Every API response carries helmet's defaults. Tested on JSON, 4xx, 5xx and the Origin refusal in [`api/test/headers.test.ts`](../api/test/headers.test.ts):
+  - `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy` and `-Resource-Policy: same-origin`, `Origin-Agent-Cluster`, with `X-Powered-By` removed;
+  - its own CSP, `default-src 'none'; frame-ancestors 'none'`. The API only answers with JSON and redirects.
+- **Web app.** The production build carries a CSP `<meta>` tag ([`web/vite.config.ts`](../web/vite.config.ts), `WEB_CSP`). The dev server leaves it out, because hot reload needs inline scripts. The policy:
+  - same-origin scripts, styles, fonts and connections (WebSocket included);
+  - images from same-origin, `data:` and `https:`, for provider avatars;
+  - `object-src 'none'`, `base-uri 'none'`, `form-action 'self'`;
+  - the build has no inline scripts or styles.
+
+  The e2e suite runs against the production build, so every Playwright test runs under this policy. [`web/e2e/csp.spec.ts`](../web/e2e/csp.spec.ts) walks every screen and fails on any CSP violation. It also checks that an injected inline script is refused.
+- **Still to come.** A meta CSP can't set `frame-ancestors`. The reverse proxy will send the same policy as a header, plus `frame-ancestors 'none'`, in the deploy phase.
+- **Dev sign-in.** It stays development and test only:
+  - the config refuses `DEV_LOGIN` in any other `NODE_ENV`;
+  - building the router there throws;
+  - its routes, including the test-only `/api/dev/pending-signup`, are not mounted unless it is enabled;
+  - the sign-in page shows the handle form only when `/api/auth/providers` reports `dev: true`.
