@@ -194,6 +194,36 @@ The slow transactions were waiting for the event loop to run their query callbac
 - **REST path.** At the median it is about 40 ms locally and much less in CI. It is six round trips, each 3–6 ms on Docker Desktop: session, rate limits, idempotency, membership, transaction, commit.
 - **Not done: merging the idempotency and membership lookups** into one query. That would save one round trip (about 3–5 ms) and is a possible later optimisation, not a tail fix.
 
+### The remaining tail: intermittent single stalls before the send route
+
+**What p99 measures.** In this test, p99 is set by the 50 slowest of 5000 deliveries, which is one message's 200 deliveries. So p99 is "the slowest of 25 messages", and one stall in one message moves it.
+
+**CI history before the fixes.** Most runs had p99 20–40 ms. Six of about twenty had p99 198–465 ms with a normal p50 of 7–15 ms; the 356 ms run was one of them.
+
+**After the fixes** (`2bade25`, plus the slowest-message breakdown in `c953f7d`):
+
+- **CI, six attempts of the same commit:** p99 22.0–34.9 ms, p50 11.4–15.3 ms.
+  - The slowest message took 22.9–37.2 ms in total.
+  - No single stage of it exceeded 12.7 ms, and its largest stage was always the transaction (7–13 ms).
+  - The longest GC pause was 1.6–2.2 ms.
+  - None of the six attempts hit a stall.
+- **Locally (Docker Desktop):** stalls still happen sometimes, and they land *before* the request reaches the send route, in the `request` stage of the slowest message:
+  - 72 ms and 268 ms in two runs;
+  - 92 ms in one run while the machine was under heavy load, when some database stages stalled too (`rate_limit` 296 ms, `commit` 346 ms).
+
+**Ruled out, with the measurements:**
+
+| Suspect | Evidence |
+|---|---|
+| GC pauses | The largest pause in the slow message's window was < 4 ms locally and ≤ 2.2 ms in CI (`PerformanceObserver`). |
+| The pool | Pool wait ≤ 0.2 ms in every run. |
+| LISTEN/NOTIFY and the ordered queue | Commit → NOTIFY ≤ 5.4 ms; queue wait ≤ 0.8 ms. |
+| Broadcast fan-out blocking the loop | **Fixed in `2bade25`**: the redundant `delivered:updated` broadcast on every send was removed, and the two send limits are checked concurrently. Loop stalls dropped from 66–83 ms to 39–49 ms locally. |
+
+**What it most likely is.** A one-off stall of the shared process before the HTTP request is handled: getting a new connection for each request on a busy event loop, or the host (CI runner or Docker Desktop VM) briefly taking the CPU away. Neither is in the server's send path.
+
+**Not chased further.** It is intermittent, isolated to single messages, and outside the send path. If it ever shows up in production, the per-stage `Server-Timing` header and the `WORST` line will show which stage it lands in.
+
 The test asserts only p95 < 1 s. The numbers vary by run and by machine.
 
 ## 11. A second API instance
