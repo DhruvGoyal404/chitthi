@@ -10,6 +10,15 @@ describe('config', () => {
     expect(c.webOrigins).toEqual(['http://localhost:5175']);
   });
 
+  it('MEDIA_DIR: absolute only, required in production, <repo>/.data/media otherwise', () => {
+    const db = { DATABASE_URL: 'postgres://u:p@127.0.0.1:5435/chitthi' };
+    expect(loadConfig({ NODE_ENV: 'development', ...db }).mediaDir).toMatch(/[\\/]\.data[\\/]media$/);
+    expect(() => loadConfig({ NODE_ENV: 'production', ...db })).toThrow(/MEDIA_DIR/);
+    expect(() => loadConfig({ NODE_ENV: 'development', ...db, MEDIA_DIR: 'relative/media' })).toThrow(/MEDIA_DIR/);
+    const abs = process.platform === 'win32' ? 'D:\\chitthi\\media' : '/var/lib/chitthi/media';
+    expect(loadConfig({ NODE_ENV: 'production', ...db, MEDIA_DIR: abs }).mediaDir).toBe(abs);
+  });
+
   it('rejects bad values and names the key without echoing the value', () => {
     const badUrl = `mysql://root:${DB_PASSWORD}@db/x`;
     let message = '';

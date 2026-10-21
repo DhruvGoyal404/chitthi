@@ -99,4 +99,18 @@ Phase 5 (sign-in and safety; [AUTH.md](AUTH.md) has the behaviour):
   - The trigger `messages_reject_deleted_direct` refuses new messages in a DM with a deleted account.
   - The app role may now `DELETE` identities.
 
-Phase 6: `attachments`, plus `messages.attachment_id`, which the delete trigger will also NULL.
+Phase 6 (media; [MEDIA.md](MEDIA.md) has the behaviour):
+
+- `20261023090000_attachments.sql`
+  - **`attachments` table.** One row per upload, random v4 id. `message_id` stays NULL until a send links it.
+    - Allowlisted `kind`/`mime` pairs. Size caps of 10 MB for images and 25 MB for files.
+    - Images must have dimensions, a thumbnail key and an inline `data:image/webp` placeholder; files must have none.
+    - Storage keys are 32 hex characters, and a display `file_name` can't contain a path separator or a control character.
+    - No hard deletes: `deleted_at` and `blob_removed_at` record the lifecycle.
+  - **Linking.** An attachment joins one message, once (`attachments_before_update`). It must be the uploader's own and the message must be inserted in the same transaction (`attachments_link_rules`), so media can't be added to an old message.
+  - **`messages.attachment_count`, 0–10.** A deferred constraint trigger checks it at commit against the rows actually linked (`messages_attachment_count_matches`). The caption (`body`) is optional only when there is at least one attachment.
+  - **Tombstones.** A tombstone marks its attachments deleted in the same transaction (`messages_tombstone_attachments`). The files are removed after commit.
+  - **Fixed along the way: three CHECKs that let NULL through.** Postgres treats a CHECK that evaluates to NULL as passed.
+    - The Phase 2 `messages_live_text` used `char_length(body) BETWEEN …`, so a live text message with a NULL body passed the database; only the API's validation stopped it.
+    - The new image-shape and link-shape checks had the same flaw for width, height, placeholder and position.
+    - All of them now spell out `IS NOT NULL`, and `attachments.schema.db.test.ts` covers each case.

@@ -15,6 +15,7 @@ coverage/
 
 # user uploads (local dev storage)
 uploads/
+.data/
 
 # logs and OS cruft
 *.log

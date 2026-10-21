@@ -29,7 +29,7 @@ const cookiesOf = (res: request.Response): Cookies => {
 const cookieHeader = (c: Cookies) => Object.entries(c).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('; ');
 
 describe('config for real sign-in', () => {
-  const base = { NODE_ENV: 'production', DATABASE_URL: UNREACHABLE_DB_URL };
+  const base = { NODE_ENV: 'production', DATABASE_URL: UNREACHABLE_DB_URL, MEDIA_DIR: '/var/lib/chitthi/media' };
   it('refuses test endpoint overrides in production, half-configured providers, and a foreign PUBLIC_ORIGIN', () => {
     expect(() => loadConfig({ ...base, GOOGLE_CLIENT_ID: 'x', GOOGLE_CLIENT_SECRET: 'y', GOOGLE_TOKEN_URL: 'http://evil.example/token' })).toThrow(/GOOGLE_TOKEN_URL/);
     expect(() => loadConfig({ ...base, GITHUB_CLIENT_ID: 'x' })).toThrow(/GITHUB_CLIENT_SECRET/);

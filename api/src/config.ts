@@ -1,3 +1,5 @@
+import { isAbsolute, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
 const DEV_LOGIN_ENVS: readonly string[] = ['development', 'test'];
@@ -48,6 +50,9 @@ const schema = z
     GITHUB_AUTH_URL: optionalUrl,
     GITHUB_TOKEN_URL: optionalUrl,
     GITHUB_API_URL: optionalUrl,
+    // Where uploaded media is stored (local filesystem driver). Outside any web root; required in
+    // production, defaults to <repo>/.data/media elsewhere.
+    MEDIA_DIR: optional,
   })
   .superRefine((env, ctx) => {
     if (env.DEV_LOGIN && !devLoginAllowed(env.NODE_ENV)) {
@@ -65,7 +70,11 @@ const schema = z
         ctx.addIssue({ code: 'custom', path: [secret], message: `set both ${id} and ${secret}, or neither` });
       }
     }
+    if (env.MEDIA_DIR !== undefined && !isAbsolute(env.MEDIA_DIR)) {
+      ctx.addIssue({ code: 'custom', path: ['MEDIA_DIR'], message: 'must be an absolute path' });
+    }
     if (env.NODE_ENV === 'production') {
+      if (env.MEDIA_DIR === undefined) ctx.addIssue({ code: 'custom', path: ['MEDIA_DIR'], message: 'required in production' });
       for (const key of ENDPOINT_OVERRIDES) {
         if (env[key] !== undefined) ctx.addIssue({ code: 'custom', path: [key], message: 'endpoint overrides are for tests only' });
       }
@@ -83,6 +92,9 @@ export type GoogleConfig = {
 };
 export type GithubConfig = { clientId: string; clientSecret: string; authUrl: string; tokenUrl: string; apiUrl: string };
 
+/** Dev and test default: <repo>/.data/media (git-ignored), the same from src/ and dist/. */
+const DEFAULT_MEDIA_DIR = resolve(fileURLToPath(new URL('../../.data/media', import.meta.url)));
+
 export type Config = {
   nodeEnv: 'development' | 'test' | 'production';
   host: string;
@@ -98,6 +110,8 @@ export type Config = {
   authLimitPoints: number | undefined;
   google: GoogleConfig | undefined;
   github: GithubConfig | undefined;
+  /** Absolute directory of the local media store. */
+  mediaDir: string;
 };
 
 export class ConfigError extends Error {
@@ -146,6 +160,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authLimitPoints: e.RATE_LIMIT_AUTH,
     google,
     github,
+    mediaDir: e.MEDIA_DIR ?? DEFAULT_MEDIA_DIR,
   };
 }
 
