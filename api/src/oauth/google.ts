@@ -59,7 +59,13 @@ export async function googleProfile(cfg: GoogleConfig, redirectUri: string, code
       issuer: cfg.issuers,
       audience: cfg.clientId,
       algorithms: ['RS256'],
-      clockTolerance: 30,
+      // Up to a minute of clock drift between Google and this server (iat a little in the
+      // future, exp a little in the past) doesn't break sign-in.
+      clockTolerance: 60,
+      // Google's ID tokens live an hour. Without maxTokenAge jose never looks at iat, so a token
+      // stamped in the future would pass; with it, iat must be in the past (within the tolerance)
+      // and no older than the hour.
+      maxTokenAge: '1h',
       requiredClaims: ['sub', 'exp', 'iat'],
     }));
   } catch (err) {

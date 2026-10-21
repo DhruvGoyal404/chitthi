@@ -8,11 +8,12 @@ import { createRateLimits } from '../src/limits.js';
 import { FLOW_COOKIE, SIGNUP_COOKIE } from '../src/oauth/router.js';
 import { SESSION_COOKIE } from '../src/sessions.js';
 import { GENEROUS, signIn } from './apphelpers.js';
-import { appPool } from './dbhelpers.js';
+import { adminPool, appPool } from './dbhelpers.js';
 import { captureLogger, testConfig, UNREACHABLE_DB_URL, WEB_ORIGIN } from './helpers.js';
 import { mockGithub, mockGoogle } from './mockProviders.js';
 
 const apiUrl = inject('apiDbUrl');
+const ownerUrl = inject('dbUrl');
 const GOOGLE_ID = 'google-client.apps.example';
 
 type Cookies = Record<string, string>;
@@ -44,6 +45,7 @@ describe('config for real sign-in', () => {
 
 describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => {
   const pool = appPool(apiUrl);
+  const admin = adminPool(ownerUrl);
   let google: Awaited<ReturnType<typeof mockGoogle>>;
   let github: Awaited<ReturnType<typeof mockGithub>>;
   let app: Express;
@@ -62,7 +64,7 @@ describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => 
     app = createApp({ config, logger, pool, rateLimits: createRateLimits(pool, logger, GENEROUS, `t${randomBytes(4).toString('hex')}:`) });
   });
   afterAll(async () => {
-    await Promise.all([google.close(), github.close(), pool.end()]);
+    await Promise.all([google.close(), github.close(), pool.end(), admin.end()]);
   });
 
   /** Starts a flow like a browser would; returns the authorize URL and this browser's cookies. */
@@ -128,6 +130,49 @@ describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => 
   it('Google: rejects a nonce mismatch', () => rejectsGoogle({ claims: { nonce: 'replayed-nonce' } }, 'invalid_id_token'));
   it('Google: rejects an unverified email', () => rejectsGoogle({ claims: { email_verified: false } }, 'email_unverified'));
   it('Google: a failed token exchange is reported, not thrown', () => rejectsGoogle({ tokenStatus: 500 }, 'token_exchange_failed'));
+  it('Google: rejects an unsigned token (alg none)', () => rejectsGoogle({ forge: 'none' }, 'invalid_id_token'));
+  it('Google: rejects HS256 keyed with the client secret (algorithm confusion)', () => rejectsGoogle({ forge: 'hs256' }, 'invalid_id_token'));
+  it('Google: rejects a token without a nonce', () => rejectsGoogle({ claims: { nonce: undefined } }, 'invalid_id_token'));
+  it('Google: rejects a token without email_verified', () => rejectsGoogle({ claims: { email_verified: undefined } }, 'email_unverified'));
+  it('Google: rejects a token issued in the future', () => rejectsGoogle({ claims: { iat: Math.floor(Date.now() / 1000) + 600, exp: Math.floor(Date.now() / 1000) + 900 } }, 'invalid_id_token'));
+
+  it('Google: tolerates up to a minute of clock skew on iat', async () => {
+    fresh();
+    google.state.scenario = { claims: { iat: Math.floor(Date.now() / 1000) + 45 } };
+    const { state, cookies } = await start('google');
+    expect((await callback('google', { state, code: 'abc' }, cookies)).headers.location).toBe('/welcome');
+  });
+  it('Google: rejects a token issued more than an hour ago, even if exp says otherwise', () => rejectsGoogle({ claims: { iat: Math.floor(Date.now() / 1000) - 7200, exp: Math.floor(Date.now() / 1000) + 300 } }, 'invalid_id_token'));
+
+  it('an expired flow is refused like a replayed one', async () => {
+    fresh();
+    const { state, cookies } = await start('google');
+    await admin.query("UPDATE oauth_flows SET expires_at = now() - interval '1 second' WHERE state_hash = sha256(convert_to($1, 'UTF8'))", [state]);
+    expect((await callback('google', { state, code: 'abc' }, cookies)).headers.location).toBe('/signin?error=state_invalid&provider=google');
+  });
+
+  it('?next= can never leave the app', async () => {
+    fresh();
+    const existing = await signIn(app, 'nxt');
+    await pool.query("INSERT INTO identities (user_id, provider, subject, email, email_verified) VALUES ($1, 'google', $2, $3, true)", [existing.id, google.state.subject, google.state.email]);
+    for (const next of ['//evil.example/x', 'https://evil.example', '/\\evil.example', 'javascript:alert(1)', '/c/ok']) {
+      const res = await request(app).get(`/api/auth/google/start?next=${encodeURIComponent(next)}`);
+      google.expectFlow(String(res.headers.location));
+      const state = new URL(String(res.headers.location)).searchParams.get('state') ?? '';
+      const done = await callback('google', { state, code: 'abc' }, cookiesOf(res));
+      expect(done.headers.location, next).toBe(next === '/c/ok' ? '/c/ok' : '/');
+    }
+  });
+
+  it('a pending signup expires after 30 minutes', async () => {
+    fresh();
+    const { state, cookies } = await start('google');
+    const signup = cookiesOf(await callback('google', { state, code: 'abc' }, cookies))[SIGNUP_COOKIE] ?? '';
+    await admin.query("UPDATE pending_signups SET expires_at = now() - interval '1 second' WHERE token_hash = sha256(convert_to($1, 'UTF8'))", [signup]);
+    const res = await request(app).get('/api/auth/onboarding').set('Cookie', `${SIGNUP_COOKIE}=${signup}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('signup_expired');
+  });
 
   it('GitHub: state + PKCE, verified primary email; a new identity becomes a pending signup', async () => {
     fresh();
@@ -143,6 +188,17 @@ describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => 
     github.state.scenario = { emails: [{ email: 'x@example.com', primary: true, verified: false }, { email: 'y@example.com', primary: false, verified: true }] };
     const { state, cookies } = await start('github');
     expect((await callback('github', { state, code: 'abc' }, cookies)).headers.location).toBe('/signin?error=email_unverified&provider=github');
+  });
+
+  it('GitHub: a failed token exchange or user lookup is reported, not thrown', async () => {
+    for (const scenario of [{ tokenStatus: 401 }, { userStatus: 502 }]) {
+      fresh();
+      github.state.scenario = scenario;
+      const { state, cookies } = await start('github');
+      const res = await callback('github', { state, code: 'abc' }, cookies);
+      expect(res.headers.location, JSON.stringify(scenario)).toBe('/signin?error=token_exchange_failed&provider=github');
+      expect(cookiesOf(res)[SESSION_COOKIE]).toBeUndefined();
+    }
   });
 
   it('refuses a replayed state, a missing state, a state from another browser, and a cancelled consent', async () => {
@@ -282,5 +338,36 @@ describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => 
       expect((await request(app).get('/api/me').set('Cookie', c)).status).toBe(401);
       expect((await request(app).post('/api/auth/logout-all').set('Origin', WEB_ORIGIN).set('Cookie', c)).status).toBe(401);
     });
+  });
+});
+
+describe.skipIf(!apiUrl)('TRUST_PROXY decides whose IP the sign-in limit counts', () => {
+  const pool = appPool(apiUrl);
+  afterAll(async () => {
+    await pool.end();
+  });
+  const appWith = (trustProxy: '0' | '1') => {
+    const config = testConfig({ DATABASE_URL: apiUrl, TRUST_PROXY: trustProxy, GITHUB_CLIENT_ID: 'id', GITHUB_CLIENT_SECRET: 'secret' });
+    const { logger } = captureLogger(config);
+    const rateLimits = createRateLimits(pool, logger, { ...GENEROUS, auth: { points: 2, duration: 60 } }, `t${randomBytes(4).toString('hex')}:`);
+    return createApp({ config, logger, pool, rateLimits });
+  };
+  const startFrom = (app: Express, ip: string) => request(app).get('/api/auth/github/start').set('X-Forwarded-For', ip);
+
+  it('0: X-Forwarded-For is ignored, so a client cannot dodge the limit by forging it', async () => {
+    const app = appWith('0');
+    expect((await startFrom(app, '203.0.113.1')).status).toBe(302);
+    expect((await startFrom(app, '203.0.113.2')).status).toBe(302);
+    expect((await startFrom(app, '203.0.113.3')).status).toBe(429);
+  });
+
+  it('1: exactly one hop is trusted: the address the proxy saw counts, not what the client claimed', async () => {
+    const app = appWith('1');
+    expect((await startFrom(app, '198.51.100.1')).status).toBe(302);
+    expect((await startFrom(app, '198.51.100.2')).status).toBe(302);
+    expect((await startFrom(app, '198.51.100.2')).status).toBe(302);
+    expect((await startFrom(app, '198.51.100.2')).status).toBe(429);
+    // A client-supplied hop in front of the proxy's own entry changes nothing.
+    expect((await startFrom(app, '10.9.9.9, 198.51.100.2')).status).toBe(429);
   });
 });

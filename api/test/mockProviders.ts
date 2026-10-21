@@ -27,6 +27,8 @@ export type GoogleScenario = {
   claims?: Partial<JWTPayload> & Record<string, unknown>;
   /** Sign with a key that is not in the JWKS. */
   foreignKey?: boolean;
+  /** Forgeries: an unsigned token, or HS256 keyed with the client secret (algorithm confusion). */
+  forge?: 'none' | 'hs256';
   tokenStatus?: number;
 };
 
@@ -34,7 +36,7 @@ export type GoogleScenario = {
  * A Google stand-in: JWKS, and a token endpoint that checks the PKCE verifier against the
  * challenge of the flow and returns an RS256 ID token shaped by the current scenario.
  */
-export async function mockGoogle(clientId: string) {
+export async function mockGoogle(clientId: string, clientSecret = 'g-secret') {
   const { publicKey, privateKey } = await generateKeyPair('RS256');
   const foreign = await generateKeyPair('RS256');
   const kid = randomUUID();
@@ -53,9 +55,12 @@ export async function mockGoogle(clientId: string) {
         name: 'Asha Rao', picture: 'https://lh3.example.com/a.png', nonce: state.nonce, iat: now, exp: now + 300,
         ...state.scenario.claims,
       };
-      const token = await new SignJWT(claims)
-        .setProtectedHeader({ alg: 'RS256', kid })
-        .sign(state.scenario.foreignKey ? foreign.privateKey : privateKey);
+      const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+      const token = state.scenario.forge === 'none'
+        ? `${b64({ alg: 'none', typ: 'JWT' })}.${b64(claims)}.`
+        : state.scenario.forge === 'hs256'
+          ? await new SignJWT(claims).setProtectedHeader({ alg: 'HS256', kid }).sign(new TextEncoder().encode(clientSecret))
+          : await new SignJWT(claims).setProtectedHeader({ alg: 'RS256', kid }).sign(state.scenario.foreignKey ? foreign.privateKey : privateKey);
       return { json: { id_token: token, access_token: 'unused', token_type: 'Bearer' } };
     }
     return { status: 404, json: {} };

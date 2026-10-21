@@ -24,7 +24,8 @@ The secrets are registered with the log scrubber. Config errors name the key, ne
   - signature (RS256 only)
   - `iss` (`https://accounts.google.com` or `accounts.google.com`)
   - `aud` = our client id
-  - `exp`, with 30 s of clock tolerance
+  - `exp` and `iat`, with 60 s of clock tolerance either way: `iat` may be up to a minute in the future, and the token may be no older than one hour (`maxTokenAge`). Without that option jose never checks `iat`.
+  - `alg: none` and HS256 tokens keyed with the client secret (algorithm confusion) are refused; tests cover both.
   - `nonce` = the one stored for this flow
 - `email_verified` must be true.
 
