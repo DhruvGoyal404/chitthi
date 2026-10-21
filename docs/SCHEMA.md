@@ -79,6 +79,18 @@ EXISTS (SELECT 1 FROM conversation_memberships p
 
 ## 6. Later migrations
 
-- Phase 5: `user_blocks (blocker_id, blocked_id)`, with the check added to the send path.
-- Phase 6: `attachments`, plus `messages.attachment_id`, which the delete trigger will also NULL.
-- OAuth `state` and the PKCE verifier stay in a short-lived signed cookie, so they need no table.
+Phase 5 (sign-in and safety; [AUTH.md](AUTH.md) has the behaviour):
+
+- `20261022090000_oauth.sql`
+  - `oauth_flows`: the hashed `state`, the PKCE verifier and the nonce; 10 minutes.
+  - `pending_signups`: a verified provider profile waiting for a handle; 30 minutes, token stored hashed.
+  - `users.avatar_url`: https only, ≤ 500 chars.
+  - One identity per provider per account: `identities_user_provider_key`.
+  - An index on `lower(identities.email)` for the "never auto-link by email" check.
+  - *Changed from the plan:* the flow state lives in a table rather than only in a signed cookie, because single use (`DELETE … RETURNING`) needs server state. The browser still gets a cookie holding the state, which binds the flow to it.
+- `20261022100000_blocks.sql`
+  - `user_blocks (blocker_id, blocked_id)`: no self-blocks; indexed both ways.
+  - The trigger `messages_reject_blocked_direct` refuses a new text message, or an edit, in a direct conversation when either participant has blocked the other. It fires after `messages_before_insert` has taken the conversation lock, so a refused send rolls its seq back and leaves no gap. A block takes the same lock before it is inserted, so it and a concurrent send are strictly ordered.
+  - `user_blocks_notify`: tells the realtime server, which hides or restores presence at once.
+
+Phase 6: `attachments`, plus `messages.attachment_id`, which the delete trigger will also NULL.

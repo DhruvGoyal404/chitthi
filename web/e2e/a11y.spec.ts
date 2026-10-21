@@ -1,15 +1,5 @@
-import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
-import { handle, openDm, pendingSignup, signedIn } from './helpers.js';
-
-const WCAG_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
-
-/** Fails with a readable list of violations (rule, impact, first targets). */
-async function expectAccessible(page: Page, what: string) {
-  const result = await new AxeBuilder({ page }).withTags(WCAG_AA).analyze();
-  const summary = result.violations.map((v) => `${v.id} (${v.impact ?? '?'}): ${v.nodes.slice(0, 3).map((n) => n.target.join(' ')).join(' | ')}`);
-  expect(summary, `${what}\n${summary.join('\n')}`).toEqual([]);
-}
+import { expectAccessible, handle, openDm, pendingSignup, signedIn } from './helpers.js';
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`every screen meets WCAG 2.1 AA (${scheme})`, async ({ browser, page }) => {

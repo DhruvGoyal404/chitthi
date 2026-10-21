@@ -10,6 +10,7 @@ import {
 import {
   catchUpByChange, catchUpBySeq, deleteForEveryone, editMessage, history, markRead, MAX_PAGE, messageReceipts, sendMessage,
 } from './repo/messages.js';
+import { block, listBlocked, unblock } from './repo/blocks.js';
 import { findUserByHandle, searchUsers } from './repo/users.js';
 import type { SessionStore } from './sessions.js';
 
@@ -46,7 +47,7 @@ const me = (res: Response) => sessionOf(res).user.id;
  */
 export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: RateLimits): Router {
   const r = Router();
-  r.use(['/conversations', '/users'], requireSession(sessions));
+  r.use(['/conversations', '/users', '/blocks'], requireSession(sessions));
   // Burst first: a quick flurry is stopped by the short window without draining the long one.
   const sendLimit: RequestHandler = async (_req, res, next) => {
     await rateLimits.sendBurst(me(res));
@@ -61,9 +62,23 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
   });
 
   r.get('/users/:handle', searchLimit, async (req, res) => {
-    const user = await findUserByHandle(pool, String(req.params.handle));
+    const user = await findUserByHandle(pool, String(req.params.handle), me(res));
     if (!user) throw new HttpError(404, 'user_not_found', 'User not found');
     res.json({ user });
+  });
+
+  r.get('/blocks', async (_req, res) => {
+    res.json({ blocked: await listBlocked(pool, me(res)) });
+  });
+
+  r.put('/blocks/:userId', async (req, res) => {
+    const { created } = await block(pool, me(res), pathId(req.params.userId, 'User'));
+    res.status(created ? 201 : 200).json({ blocked: true });
+  });
+
+  r.delete('/blocks/:userId', async (req, res) => {
+    await unblock(pool, me(res), pathId(req.params.userId, 'User'));
+    res.status(204).end();
   });
 
   r.get('/conversations', async (_req, res) => {

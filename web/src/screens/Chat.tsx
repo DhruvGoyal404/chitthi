@@ -79,8 +79,11 @@ function ChatView({ id }: { id: string }) {
         <p className="flex-1 p-6 text-center text-sm text-ink-soft">{conv.isError ? 'Could not open this conversation.' : 'Unfolding the letter…'}</p>
       )}
       <Composer key={editing?.id ?? 'new'}
-        disabled={!c?.myRole}
-        disabledReason={c && !c.myRole ? 'You left this group. You can read it, but not write.' : 'Loading…'}
+        disabled={!c?.myRole || c.block !== null}
+        disabledReason={!c ? 'Loading…'
+          : !c.myRole ? 'You left this group. You can read it, but not write.'
+          : c.block === 'by_me' ? 'You blocked this person. Unblock them in contact info to send messages.'
+          : "You can't message this person."}
         editing={editing ? { body: editing.body ?? '' } : null}
         onSend={(body) => { void rt.send(id, body); requestAnimationFrame(() => list.current?.scrollToBottom()); }}
         onSaveEdit={(body) => { if (editing) act(rt.edit(id, editing.id, body)); setEditing(null); }}

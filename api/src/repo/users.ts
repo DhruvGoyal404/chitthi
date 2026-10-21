@@ -53,10 +53,11 @@ export function mapUserError(err: unknown): unknown {
   return err;
 }
 
-/** Exact, case-insensitive handle lookup of an active user. */
-export async function findUserByHandle(pool: pg.Pool, handle: string): Promise<User | undefined> {
+/** Exact, case-insensitive handle lookup of an active user who hasn't blocked the caller. */
+export async function findUserByHandle(pool: pg.Pool, handle: string, callerId: string): Promise<User | undefined> {
   const { rows: [user] } = await pool.query<User>(
-    `SELECT ${USER_COLUMNS} FROM users u WHERE lower(u.handle) = lower($1) AND u.disabled_at IS NULL`, [handle],
+    `SELECT ${USER_COLUMNS} FROM users u WHERE lower(u.handle) = lower($1) AND u.disabled_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = u.id AND b.blocked_id = $2)`, [handle, callerId],
   );
   return user;
 }
@@ -82,7 +83,8 @@ export async function updateProfile(pool: pg.Pool, id: string, patch: { handle?:
 }
 
 /**
- * Handle prefix search for starting a conversation: active users only, never the caller, at most
+ * Handle prefix search for starting a conversation: active users only, never the caller nor
+ * anyone who blocked the caller, at most
  * `limit`. `_` is a LIKE wildcard, so it is escaped; handles contain nothing else special.
  */
 export async function searchUsers(pool: pg.Pool, prefix: string, callerId: string, limit = 8): Promise<User[]> {
@@ -90,6 +92,7 @@ export async function searchUsers(pool: pg.Pool, prefix: string, callerId: strin
   const { rows } = await pool.query<User>(
     `SELECT ${USER_COLUMNS} FROM users u
       WHERE lower(u.handle) LIKE $1 AND u.id <> $2 AND u.disabled_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = u.id AND b.blocked_id = $2)
       ORDER BY lower(u.handle) LIMIT $3`,
     [pattern, callerId, limit],
   );

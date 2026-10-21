@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Avatar, Button, Icon, IconButton, PresenceDot, TopBar } from '../components/ui.js';
 import { api, ApiError } from '../lib/api.js';
@@ -30,6 +31,47 @@ function MemberRow({ m, meId, canRemove, onRemove }: { m: Member; meId: string |
         <IconButton label={`Remove ${m.displayName}`} onClick={onRemove}><Icon.Close /></IconButton>
       )}
     </li>
+  );
+}
+
+/**
+ * Block or unblock the other person of a DM. Blocking asks first and says what it does and
+ * doesn't do (shared groups are unchanged; docs/AUTH.md explains why).
+ */
+function BlockControl({ conversationId, peer, blocked }: { conversationId: string; peer: Member; blocked: boolean }) {
+  const qc = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const change = useMutation({
+    mutationFn: (block: boolean) => api(`/blocks/${peer.userId}`, { method: block ? 'PUT' : 'DELETE' }),
+    onSuccess: () => {
+      setConfirming(false);
+      void qc.invalidateQueries({ queryKey: ['conversation', conversationId] });
+      void qc.invalidateQueries({ queryKey: ['blocks'] });
+    },
+  });
+  if (blocked) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-ink">You blocked {peer.displayName}.</p>
+        <Button variant="ghost" disabled={change.isPending} onClick={() => { change.mutate(false); }}>Unblock {peer.displayName}</Button>
+      </div>
+    );
+  }
+  if (!confirming) {
+    return <Button variant="danger" onClick={() => { setConfirming(true); }}>Block {peer.displayName}</Button>;
+  }
+  return (
+    <div className="space-y-3 rounded-md border border-stamp p-3" role="group" aria-label={`Block ${peer.displayName}?`}>
+      <p className="text-sm text-ink">
+        Block {peer.displayName}? Neither of you can message the other here, they can't start a chat with you or add you
+        to groups, and you stop seeing each other's online status and typing. Groups you already share stay as they are.
+      </p>
+      <div className="flex gap-2">
+        <Button variant="danger" disabled={change.isPending} onClick={() => { change.mutate(true); }}>Block</Button>
+        <Button variant="ghost" onClick={() => { setConfirming(false); }}>Cancel</Button>
+      </div>
+      {change.isError && <p role="alert" className="text-sm text-stamp">{change.error instanceof ApiError ? change.error.message : 'Could not block. Try again.'}</p>}
+    </div>
   );
 }
 
@@ -80,6 +122,10 @@ export function ConversationInfo() {
             <ul className="text-sm text-ink-soft">{former.map((m) => <li key={m.userId} className="py-1">{m.displayName} @{m.handle}</li>)}</ul>
           </div>
         )}
+        {c?.kind === 'direct' && (() => {
+          const peer = c.members.find((m) => m.userId !== me.data?.id);
+          return peer && <BlockControl conversationId={id} peer={peer} blocked={c.block === 'by_me'} />;
+        })()}
         {c?.kind === 'group' && c.myRole && (
           <Button variant="danger" onClick={() => { leave.mutate(); }} disabled={leave.isPending}>Leave group</Button>
         )}

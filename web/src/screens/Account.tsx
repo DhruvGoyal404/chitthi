@@ -1,10 +1,10 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router';
 import { Button, TopBar } from '../components/ui.js';
 import { buttonClass } from '../components/styles.js';
 import { api } from '../lib/api.js';
 import { linkError, PROVIDERS, providerName } from '../lib/authErrors.js';
-import type { Identity } from '../lib/types.js';
+import type { BlockedUser, Identity } from '../lib/types.js';
 import { useProviders, useSignOut } from '../session.js';
 import { BackLink } from './Shell.js';
 
@@ -44,6 +44,33 @@ function SignInMethods() {
   );
 }
 
+function BlockedPeople() {
+  const qc = useQueryClient();
+  const blocked = useQuery({ queryKey: ['blocks'], queryFn: () => api<{ blocked: BlockedUser[] }>('/blocks') });
+  const unblock = useMutation({
+    mutationFn: (userId: string) => api(`/blocks/${userId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['blocks'] });
+      void qc.invalidateQueries({ queryKey: ['conversation'] });
+    },
+  });
+  const list = blocked.data?.blocked ?? [];
+  return (
+    <section className="space-y-3" aria-labelledby="blocked-h">
+      <h2 id="blocked-h" className="text-sm font-medium text-ink-soft">Blocked people</h2>
+      {blocked.isSuccess && list.length === 0 && <p className="text-sm text-ink-soft">You haven't blocked anyone. You can block someone from their contact info.</p>}
+      <ul className="space-y-2">
+        {list.map((u) => (
+          <li key={u.userId} className="flex min-h-11 items-center justify-between gap-3">
+            <span className="min-w-0 truncate text-ink">{u.displayName} <span className="text-ink-soft">@{u.handle}</span></span>
+            <Button variant="ghost" disabled={unblock.isPending} onClick={() => { unblock.mutate(u.userId); }}>Unblock<span className="sr-only"> {u.displayName}</span></Button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function Account() {
   const navigate = useNavigate();
   const signOutEverywhere = useSignOut(true);
@@ -53,6 +80,7 @@ export function Account() {
       <TopBar title="Account" back={<BackLink to="/settings" />} />
       <div className="min-h-0 flex-1 space-y-8 overflow-y-auto p-4">
         <SignInMethods />
+        <BlockedPeople />
         <section className="space-y-2" aria-labelledby="sessions-h">
           <h2 id="sessions-h" className="text-sm font-medium text-ink-soft">Sessions</h2>
           <p className="text-sm text-ink">Signs out every browser and device, including this one.</p>

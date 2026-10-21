@@ -87,3 +87,26 @@ When a limit stops a request, the API answers `429` with `Retry-After`, `error.c
 | Socket connects | user | 30 / min | Checked in the handshake. |
 
 In the web app, an optimistic send that gets a 429 becomes "failed" with the server's explanation and a Retry button. A retry uses the same client message id, so it is stored at most once. Other screens show the message where the action was taken.
+
+## Blocking
+
+A user can block and unblock another: from the contact info of a DM (after a confirmation that says what it does), or from the Account page, which lists everyone they have blocked. Routes: `GET /api/blocks`, `PUT /api/blocks/:userId`, `DELETE /api/blocks/:userId`.
+
+What a block does, in every path (REST and socket), tested in [`api/test/blocks.db.test.ts`](../api/test/blocks.db.test.ts):
+
+| Effect | Where it is enforced |
+|---|---|
+| Neither person can send or edit in their DM. Deleting your own message for everyone stays allowed. History stays readable. | The database trigger `messages_reject_blocked_direct`, under the conversation lock, so no seq is lost. |
+| A new DM can't be started in either direction. An existing one still opens. | `findOrCreateDirect`. |
+| Someone who blocked you can't be added by you to a new or existing group. | `createGroup`, `addMember`. |
+| Someone who blocked you doesn't appear in your handle search or exact lookup. | `searchUsers`, `findUserByHandle`. |
+| No presence, last seen or typing in either direction, including in groups they share. | The realtime presence (events, snapshots, introductions) and typing relay. A block or unblock takes effect at once through `user_blocks_notify`. |
+
+**The blocker is told plainly** ("You blocked this person. Unblock them to send messages."), because they can undo it. **The blocked person gets a neutral refusal** ("You can't message this person."). They can still infer the block from it, as in any messenger; hiding a refusal would mean pretending to deliver messages that are thrown away, which this app does not do.
+
+**Groups they already share are unaffected:** both stay members, both still send there, and each sees the other's group messages. The reasons:
+
+- A group belongs to all its members. One member's block can't remove another member, or silently filter what the rest of the group sees and replies to. Hiding some messages from one reader would make that reader's view of the conversation incoherent: replies to messages they can't see, and unread counts that disagree with what is shown.
+- Every member reads the same `seq` sequence. Holes for one reader would break the gap-free model ([SCHEMA.md](SCHEMA.md)).
+- What a block protects against is *new contact*: DMs, being added to groups, being found, and being watched (presence, typing). All of that is enforced.
+- To get away from someone in a group, leave it, or ask an admin to remove them.

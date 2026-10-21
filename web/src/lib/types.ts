@@ -55,7 +55,11 @@ export type ConversationDetail = {
   changeSeq: number;
   myRole: Role | null;
   members: Member[];
+  /** Direct conversations: a block stops messages here (mine, or theirs). */
+  block: 'by_me' | 'by_them' | null;
 };
+
+export type BlockedUser = { userId: string; handle: string; displayName: string; blockedAt: string };
 
 export type PresenceEvent = { userId: string; online: boolean; lastSeenAt: string | null };
 export type ReceiptEvent = { conversationId: string; userId: string; seq: number };

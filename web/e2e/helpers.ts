@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { randomBytes } from 'node:crypto';
 
@@ -38,4 +39,13 @@ export async function pendingSignup(page: Page, displayName: string): Promise<vo
   }, displayName);
   expect(status).toBe(201);
   await page.goto('/welcome');
+}
+
+const WCAG_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
+
+/** Fails with a readable list of violations (rule, impact, first targets). */
+export async function expectAccessible(page: Page, what: string) {
+  const result = await new AxeBuilder({ page }).withTags(WCAG_AA).analyze();
+  const summary = result.violations.map((v) => `${v.id} (${v.impact ?? '?'}): ${v.nodes.slice(0, 3).map((n) => n.target.join(' ')).join(' | ')}`);
+  expect(summary, `${what}\n${summary.join('\n')}`).toEqual([]);
 }

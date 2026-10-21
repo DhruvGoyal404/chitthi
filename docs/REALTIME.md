@@ -104,11 +104,12 @@ The web implementation is `web/src/sync/sync.ts` (rules, unit-tested with a fake
 ## 7. Receipts, typing, presence
 
 - **Read and delivered.** These are per-member watermarks (`read_markers`), forward-only and capped by the database. Unread = live text from others after `last_read_seq`, within the window; it is never stored. Sending moves your own read marker to your message.
-- **Typing.** Every event is membership-checked against the database. It is relayed only to the other active members, never to the typist's own tabs, at most once per second per tab and conversation. It expires server-side after ~5 s without a refresh, and immediately when the tab closes. It is never persisted.
+- **Typing.** Every event is membership-checked against the database. It is relayed only to the other active members with no block in either direction between them and the typist, never to the typist's own tabs, at most once per second per tab and conversation. It expires server-side after ~5 s without a refresh, and immediately when the tab closes. It is never persisted.
 - **Presence.** Each user has an in-memory set of sockets on this instance.
   - Online when the first socket connects.
   - Offline only after ~10 s with zero sockets, so a reload within the grace produces no events at all.
   - `users.last_seen_at` is written when the user goes offline, and on shutdown.
+  - It is visible only between users who share an active conversation and have no block in either direction (events, snapshots and introductions alike). A block hides the two from each other at once, reported as offline with no last seen; an unblock restores it if they still share a conversation.
   - When a membership starts, the new member and the other active members get each other's presence (`presence:update`). This happens **outside** the ordered queue and is coalesced per conversation for 25 ms, so a 100-member group creation is one batch (two queries) and never delays message fan-out. A first version did this per membership inside the queue, and the 200-socket test caught it holding message delivery back by ~5 s.
 
 ## 8. Guarantees

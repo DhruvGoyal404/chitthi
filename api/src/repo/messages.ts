@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { HttpError } from '../errors.js';
 import { assertUuid, readOnly, requireActive, requireReader, visibleTo } from './access.js';
+import { directBlockError } from './blocks.js';
 import { isUniqueViolation, violates, withTx } from './pg.js';
 import { codePointLength } from './text.js';
 
@@ -102,6 +103,7 @@ export async function sendMessage(pool: pg.Pool, input: SendInput): Promise<Send
     }
     // Removed between the access check and the insert: the trigger re-checks under the lock.
     if (violates(err, 'messages_sender_active_member')) throw readOnly();
+    if (violates(err, 'messages_direct_blocked')) throw await directBlockError(pool, input.conversationId, input.senderId);
     throw err;
   }
 }
@@ -130,7 +132,10 @@ export async function editMessage(pool: pg.Pool, input: { conversationId: string
                      WHERE p.conversation_id = m.conversation_id AND p.user_id = $2 AND p.left_at IS NULL)
       RETURNING ${MSG_COLUMNS}`,
     [input.messageId, input.userId, body, input.conversationId],
-  );
+  ).catch(async (err: unknown) => {
+    if (violates(err, 'messages_direct_blocked')) throw await directBlockError(pool, input.conversationId, input.userId);
+    throw err;
+  });
   return row ?? explainMiss(pool, input.conversationId, input.messageId, input.userId);
 }
 

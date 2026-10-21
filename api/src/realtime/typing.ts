@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { z } from 'zod';
+import { notBlocked } from '../repo/blocks.js';
 import { userRoom, type ChitthiSocket, type InboundHandler, type Realtime } from './server.js';
 
 export type TypingEvent = { conversationId: string; userId: string; typing: boolean; ttlMs: number };
@@ -13,7 +14,7 @@ type Entry = { timer: NodeJS.Timeout; lastRelay: number; recipients: string[] };
 /**
  * Typing indicators: ephemeral, in memory, never persisted. Every `typing` event is checked
  * against the database (an active membership is required), relayed only to the conversation's
- * other active members, at most once per relayIntervalMs per socket and conversation, and
+ * other active members with no block either way between them and the typist, at most once per relayIntervalMs per socket and conversation, and
  * expires on its own: no refresh within ttlMs, or the socket going away, relays typing:false.
  */
 export function createTyping(pool: pg.Pool, tuning: TypingTuning = DEFAULT_TYPING) {
@@ -52,7 +53,8 @@ export function createTyping(pool: pg.Pool, tuning: TypingTuning = DEFAULT_TYPIN
       `SELECT EXISTS (SELECT 1 FROM conversation_memberships WHERE conversation_id = $1 AND user_id = $2) AS ever,
               EXISTS (SELECT 1 FROM conversation_memberships WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL) AS active,
               ARRAY(SELECT DISTINCT user_id FROM conversation_memberships
-                     WHERE conversation_id = $1 AND left_at IS NULL AND user_id <> $2) AS others`,
+                     WHERE conversation_id = $1 AND left_at IS NULL AND user_id <> $2
+                       AND ${notBlocked('user_id', '$2::uuid')}) AS others`,
       [conversationId, me],
     );
     if (!row?.active) {

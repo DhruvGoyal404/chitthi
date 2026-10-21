@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { HttpError } from '../errors.js';
 import { accessOf, assertUuid, notFound, requireActive, type Role } from './access.js';
+import { blockedError, blockedMe, blockState, type BlockState } from './blocks.js';
 import { isUniqueViolation, violates, withTx, type Queryable } from './pg.js';
 import { codePointLength } from './text.js';
 
@@ -53,6 +54,9 @@ export async function findOrCreateDirect(
   const existing = await find();
   if (existing) return { conversation: existing, created: false };
   await requireLiveUsers(pool, [userId, otherId]);
+  // An existing DM still opens (its history stays readable); a new one needs no block either way.
+  const block = await blockState(pool, userId, otherId);
+  if (block) throw blockedError(block, 'message');
   await beforeCreate?.();
   try {
     const conversation = await withTx(pool, async (tx) => {
@@ -84,6 +88,9 @@ export async function createGroup(pool: pg.Pool, input: { creatorId: string; tit
   const others = [...new Set(input.memberIds)].filter((id) => id !== input.creatorId);
   if (others.length + 1 > MAX_GROUP_MEMBERS) throw new HttpError(400, 'invalid_request', `Groups have at most ${String(MAX_GROUP_MEMBERS)} members`);
   await requireLiveUsers(pool, [input.creatorId, ...others]);
+  if ((await blockedMe(pool, input.creatorId, others)).length > 0) {
+    throw new HttpError(403, 'blocked', "Some of the people you picked can't be added by you.");
+  }
   return withTx(pool, async (tx) => {
     const { rows: [conv] } = await tx.query<Conversation>(
       `INSERT INTO conversations AS c (kind, title, created_by) VALUES ('group', $1, $2) RETURNING ${CONV_COLUMNS}`,
@@ -115,6 +122,9 @@ export async function addMember(pool: pg.Pool, input: { conversationId: string; 
   if (!canManage(actor.activeRole)) throw forbidden('Only group owners and admins can add members');
   if (input.role === 'admin' && actor.activeRole !== 'owner') throw forbidden('Only the owner can add admins');
   await requireLiveUsers(pool, [input.userId]);
+  // Someone who blocked the actor can't be added by them. (A block never removes anyone from a
+  // group they are already in: see docs/AUTH.md.)
+  if ((await blockState(pool, input.actorId, input.userId)) === 'by_them') throw blockedError('by_them', 'add');
   try {
     return await withTx(pool, async (tx) => {
       const { rows: [m] } = await tx.query<{ joined_seq: number }>(
@@ -281,6 +291,8 @@ export type ConversationDetail = Conversation & {
   /** The caller's role, or null when they can only read (former member). */
   myRole: Role | null;
   members: Member[];
+  /** Direct conversations: whether a block stops messages here (and whose). Always null for groups. */
+  block: BlockState;
 };
 
 /**
@@ -306,5 +318,6 @@ export async function getConversation(pool: pg.Pool, conversationId: string, use
       ORDER BY p.left_at IS NULL DESC, CASE p.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, lower(u.handle)`,
     [conversationId],
   );
-  return { ...conv, myRole: access.activeRole, members };
+  const peer = conv.kind === 'direct' ? members.find((m) => m.userId !== userId) : undefined;
+  return { ...conv, myRole: access.activeRole, members, block: peer ? await blockState(pool, userId, peer.userId) : null };
 }

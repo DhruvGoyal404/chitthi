@@ -40,6 +40,7 @@ export function as(app: Target, user: Signed) {
   return {
     get: (path: string) => wrap(request(app).get(`/api${path}`)),
     post: (path: string, body?: object) => wrap(request(app).post(`/api${path}`)).send(body ?? {}),
+    put: (path: string, body?: object) => wrap(request(app).put(`/api${path}`)).send(body ?? {}),
     patch: (path: string, body: object) => wrap(request(app).patch(`/api${path}`)).send(body),
     delete: (path: string) => wrap(request(app).delete(`/api${path}`)),
   };

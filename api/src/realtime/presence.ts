@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { Logger } from 'pino';
+import { notBlocked } from '../repo/blocks.js';
 import { CONV_CHANNEL } from './fanout.js';
 import { userRoom, type ChitthiSocket, type Realtime } from './server.js';
 
@@ -17,8 +18,10 @@ const INTRO_BATCH_MS = 25;
  * - Going offline waits `graceMs` with zero sockets, so a reload or a flaky network doesn't
  *   flicker. Reconnecting within the grace cancels it silently.
  * - On going offline, users.last_seen_at is persisted.
- * - Presence is visible only to users who share an active conversation: events go only to their
- *   user rooms, and each new socket gets a snapshot of exactly those users.
+ * - Presence is visible only to users who share an active conversation and have no block in
+ *   either direction between them: events go only to their user rooms, and each new socket gets
+ *   a snapshot of exactly those users. A block hides each from the other at once (as offline,
+ *   with no last seen); unblocking shows them again if they still share a conversation.
  * - When a membership starts (DM created, group created, member added), the new member and the
  *   conversation's other active members are sent each other's presence at once, so nobody has
  *   to reconnect to see a new contact's status.
@@ -33,7 +36,7 @@ export function attachPresence(realtime: Realtime, pool: pg.Pool, logger: Logger
          FROM conversation_memberships p1
          JOIN conversation_memberships p2
            ON p2.conversation_id = p1.conversation_id AND p2.left_at IS NULL AND p2.user_id <> p1.user_id
-        WHERE p1.user_id = $1 AND p1.left_at IS NULL`,
+        WHERE p1.user_id = $1 AND p1.left_at IS NULL AND ${notBlocked('p2.user_id', '$1::uuid')}`,
       [userId],
     );
     return rows.map((r) => r.user_id);
@@ -113,16 +116,23 @@ export function attachPresence(realtime: Realtime, pool: pg.Pool, logger: Logger
     );
     const members = rows.map((r) => r.user_id);
     if (members.length < 2) return;
+    const { rows: blocks } = await pool.query<{ a: string; b: string }>(
+      'SELECT blocker_id AS a, blocked_id AS b FROM user_blocks WHERE blocker_id = ANY($1::uuid[]) AND blocked_id = ANY($1::uuid[])',
+      [members],
+    );
+    const hidden = new Set(blocks.flatMap(({ a, b }) => [`${a}|${b}`, `${b}|${a}`]));
     const byId = new Map((await presenceOf(members)).map((e) => [e.userId, e]));
     const of = (ids: string[]) => ids.flatMap((id) => byId.get(id) ?? []);
-    // Each joiner learns about every other member; existing members learn about the joiners.
+    // Each joiner learns about every other member; existing members learn about the joiners;
+    // never across a block.
     for (const j of joiners) {
-      const users = of(members.filter((m) => m !== j));
+      const users = of(members.filter((m) => m !== j && !hidden.has(`${j}|${m}`)));
       if (users.length > 0) realtime.io.to(userRoom(j)).emit('presence:update', { users });
     }
-    const existing = members.filter((m) => !joiners.has(m));
-    const joined = of([...joiners]);
-    if (existing.length > 0 && joined.length > 0) realtime.io.to(existing.map(userRoom)).emit('presence:update', { users: joined });
+    for (const m of members.filter((x) => !joiners.has(x))) {
+      const users = of([...joiners].filter((j) => !hidden.has(`${m}|${j}`)));
+      if (users.length > 0) realtime.io.to(userRoom(m)).emit('presence:update', { users });
+    }
   }
 
   function flushJoins(): void {
@@ -134,7 +144,25 @@ export function attachPresence(realtime: Realtime, pool: pg.Pool, logger: Logger
     }
   }
 
+  // A block hides the two from each other at once; an unblock shows them again if they still
+  // share an active conversation. (Their clients keep no presence for someone not reported.)
+  async function blockChanged(a: string, b: string, blocked: boolean): Promise<void> {
+    if (blocked) {
+      realtime.io.to(userRoom(a)).emit('presence:update', { users: [{ userId: b, online: false, lastSeenAt: null }] });
+      realtime.io.to(userRoom(b)).emit('presence:update', { users: [{ userId: a, online: false, lastSeenAt: null }] });
+      return;
+    }
+    if (!(await coMembers(a)).includes(b)) return;
+    const [ea, eb] = await Promise.all([presenceOf([a]), presenceOf([b])]);
+    if (eb.length > 0) realtime.io.to(userRoom(a)).emit('presence:update', { users: eb });
+    if (ea.length > 0) realtime.io.to(userRoom(b)).emit('presence:update', { users: ea });
+  }
+
   realtime.onChannel(CONV_CHANNEL, (p) => {
+    if (p.kind === 'block_changed' && typeof p.blocker_id === 'string' && typeof p.blocked_id === 'string') {
+      blockChanged(p.blocker_id, p.blocked_id, p.blocked === true).catch((err: unknown) => { logger.error({ err }, 'presence block update failed'); });
+      return Promise.resolve();
+    }
     if (p.kind !== 'member_joined' || typeof p.conversation_id !== 'string' || typeof p.user_id !== 'string') return Promise.resolve();
     const set = pendingJoins.get(p.conversation_id) ?? new Set<string>();
     set.add(p.user_id);
