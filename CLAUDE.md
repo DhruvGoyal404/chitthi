@@ -8,6 +8,7 @@ Never use WhatsApp's name, logo, colours or look anywhere in the product.
 
 - **End-to-end encryption.** Messages are encrypted in transit (TLS in deployment) and stored in plaintext in Postgres. **The server, and anyone with database access, can read every message.** The UI must never claim otherwise.
 - **Voice and video calls.** There is no signalling, WebRTC or call UI. The legacy stubs were removed; don't add new ones.
+- **Voice notes and video attachments.** Media is photos and files only (Phase 6). Audio and video uploads are refused by the type allowlist.
 
 Stretch goals, only after Phase 7: message search (Postgres full-text) and web push notifications.
 
@@ -61,7 +62,16 @@ These hold for every change. A change that breaks one of them is a bug, even if 
 | 3 | Real-time delivery | Socket tests with two users and three sockets (one user with two tabs) show: the ack arrives before the echo; no duplicates; a gap is repaired after a forced disconnect; presence stays online when one of two tabs closes; read state syncs across tabs; a forged join, or a send to a conversation the user isn't in, is rejected. |
 | 4 | Frontend | Two browsers (plus a third tab) can sign in, start a DM, chat, see typing and read state, reload without losing history, and survive going offline and back without duplicates or holes. A Playwright e2e test covers this. |
 | 5 | Auth and limits | Google/GitHub OAuth and hashed sessions work, including "log out everywhere". Contact consent and blocks are enforced. helmet/CSP and rate limits (sign-in, send, upload) are in place. `npm audit --omit=dev` shows no high or critical issues. Regression tests exist for the audit's S1–S16 findings. |
-| 6 | Media | Authenticated attachments on local disk: size limits, magic-byte checks, a membership-checked download route. Tests reject oversized files, HTML/SVG and renamed executables. Voice notes and images round-trip between two users. |
+| 6 | Media | Photos (JPEG, PNG, WebP, static GIF) and files (PDF, plain text, ZIP) in DMs and groups, up to 10 per message with an optional caption ([docs/MEDIA.md](docs/MEDIA.md)):
+  - storage behind an interface (local filesystem driver, random keys, atomic writes);
+  - streamed uploads with size caps enforced while streaming (10 MB / 25 MB) and types from magic bytes only;
+  - images re-encoded with sharp (EXIF/GPS stripped, thumbnail, inline placeholder);
+  - members-only downloads with the same 404 for everyone else (attachment disposition, nosniff, sandbox CSP, private cache);
+  - daily quotas (200 MB, 100 uploads per user) and a disk guard (507 below max(15 %, 2 GB) free);
+  - tombstones and account erasure remove files, and a sweeper removes unattached uploads after 1 h;
+  - web: attach / drag-and-drop / paste, previews, progress, cancel, retry, lightbox.
+
+  Tests cover spoofed types, polyglots, mid-stream cut-off, traversal names, EXIF stripping, non-member and left-member access, the sweeper, quotas and disk failure. **Done.** Voice notes and video are out of scope (see Non-goals). |
 | 7 | Deploy | Production images (Node 22 LTS, non-root, pinned digests). A presigned object-storage adapter. CI covers lint, typecheck, test and build. On a clean checkout, `docker compose -p chitthi up` serves web, API and DB on the assigned ports. Secrets live only in the platform's secret store. |
 
 ## Commands
@@ -73,7 +83,8 @@ npm run db:migrate          # dbmate up, as the owner (MIGRATION_DATABASE_URL)
 npm run db:api-password     # set the chitthi_api login password from DATABASE_URL
 npm run dev:api             # API on 127.0.0.1:8082
 npm run dev:web             # web on http://localhost:5175 (proxies /api, including WebSockets, to 8082)
-npm run typecheck && npm run lint && npm test
+npm run typecheck && npm run lint && npm test   # the full gate (deterministic)
+npm run test:perf          # timing-sensitive tests (200-socket latency, 20 concurrent senders); own CI job
 ```
 
 Dev sign-in shortcut: set `DEV_LOGIN=true` with `NODE_ENV=development` or `test`. The config refuses to load it in any other environment, and the router throws if it is built anyway. It is rate-limited per IP and subject to the Origin check.
