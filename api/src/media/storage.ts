@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, open, rename, rm, stat, statfs } from 'node:fs/promises';
+import { mkdir, open, readdir, rename, rm, stat, statfs } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -35,6 +35,10 @@ export interface Storage {
   delete(key: string): Promise<void>;
   /** Free and total bytes where new objects go (the disk guard reads this). */
   space(): Promise<{ free: number; total: number }>;
+  /** Every stored object (for reconciling with the database). */
+  list(): AsyncIterable<{ key: string; modifiedAt: Date }>;
+  /** Removes partial writes older than the cutoff (left by a crash mid-upload); returns how many. */
+  cleanTemp(olderThan: Date): Promise<number>;
 }
 
 const KEY = /^[0-9a-f]{32}$/;
@@ -128,6 +132,32 @@ export class LocalStorage implements Storage {
     } catch (err) {
       throw new StorageError('could not delete the object', err);
     }
+  }
+
+  async *list(): AsyncIterable<{ key: string; modifiedAt: Date }> {
+    const dirs = async (path: string) => (await readdir(path, { withFileTypes: true }).catch(() => [])).filter((e) => e.isDirectory() && /^[0-9a-f]{2}$/.test(e.name));
+    for (const a of await dirs(this.root)) {
+      for (const b of await dirs(join(this.root, a.name))) {
+        for (const f of await readdir(join(this.root, a.name, b.name), { withFileTypes: true })) {
+          if (!f.isFile() || !KEY.test(f.name) || !f.name.startsWith(a.name + b.name)) continue;
+          const s = await stat(join(this.root, a.name, b.name, f.name)).catch(() => undefined);
+          if (s) yield { key: f.name, modifiedAt: s.mtime };
+        }
+      }
+    }
+  }
+
+  async cleanTemp(olderThan: Date): Promise<number> {
+    let removed = 0;
+    for (const f of await readdir(this.tmp, { withFileTypes: true }).catch(() => [])) {
+      const path = join(this.tmp, f.name);
+      const s = await stat(path).catch(() => undefined);
+      if (f.isFile() && s && s.mtime < olderThan) {
+        await rm(path, { force: true });
+        removed++;
+      }
+    }
+    return removed;
   }
 
   async space(): Promise<{ free: number; total: number }> {

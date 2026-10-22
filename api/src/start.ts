@@ -2,6 +2,7 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import type pg from 'pg';
 import type { Logger } from 'pino';
 import { createApp } from './app.js';
+import { startSweeper } from './media/lifecycle.js';
 import { LocalStorage, type Storage } from './media/storage.js';
 import type { Config } from './config.js';
 import { createRateLimits, limitsFor, type RateLimits } from './limits.js';
@@ -29,6 +30,8 @@ export type StartOptions = {
   rateLimits?: RateLimits;
   /** Where media lives (default: the local driver on config.mediaDir). */
   storage?: Storage;
+  /** How often the media sweeper runs (default 10 min; 0 turns it off, as test servers do). */
+  sweepIntervalMs?: number;
   /** Overrides for tests (inbound rate limit, listener backoff). */
   realtime?: Pick<RealtimeOptions, 'rateLimit'>;
   listenerBackoff?: { minMs: number; maxMs: number };
@@ -62,6 +65,7 @@ export async function startApi(opts: StartOptions): Promise<Started> {
   const presence = attachPresence(realtime, pool, logger, opts.tuning?.presence ?? DEFAULT_PRESENCE);
   // The LISTEN connection retries in the background, so an unreachable database never blocks startup.
   listener.start();
+  const sweeper = startSweeper(pool, storage, logger, opts.sweepIntervalMs);
 
   await new Promise<void>((resolve) => {
     httpServer.listen(config.port, config.host, resolve);
@@ -78,6 +82,7 @@ export async function startApi(opts: StartOptions): Promise<Started> {
       await realtime.close();
       await presence.flush();
       await listener.stop();
+      await sweeper.stop();
     },
   };
 }

@@ -77,6 +77,9 @@ export async function deleteAccount(pool: pg.Pool, userId: string, opts: { erase
     await tx.query('DELETE FROM identities WHERE user_id = $1', [userId]);
     await tx.query('DELETE FROM user_blocks WHERE blocker_id = $1 OR blocked_id = $1', [userId]);
     await tx.query('DELETE FROM oauth_flows WHERE user_id = $1', [userId]);
+    // Uploads never sent go in both modes (with eraseMessages, the tombstones above already
+    // marked every attachment of the user's messages).
+    await tx.query('UPDATE attachments SET deleted_at = now() WHERE uploader_id = $1 AND message_id IS NULL AND deleted_at IS NULL', [userId]);
     return { groupsLeft: groups.length, ownershipTransferred, messagesErased };
   });
 }

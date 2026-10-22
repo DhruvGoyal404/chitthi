@@ -10,6 +10,7 @@ import {
 import {
   catchUpByChange, catchUpBySeq, deleteForEveryone, editMessage, history, markRead, MAX_PAGE, messageReceipts, sendMessage,
 } from './repo/messages.js';
+import type { PurgeScope } from './media/lifecycle.js';
 import { block, listBlocked, unblock } from './repo/blocks.js';
 import { StageTimer, traceCommit } from './timing.js';
 import { findUserByHandle, searchUsers } from './repo/users.js';
@@ -46,7 +47,10 @@ const me = (res: Response) => sessionOf(res).user.id;
  * response is the stored row with its seq, which is the client's acknowledgement. Sockets only
  * push what was committed (docs/REALTIME.md).
  */
-export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: RateLimits): Router {
+/** Removes the files of attachments just marked deleted (after commit; the sweeper retries failures). */
+export type Purge = (scope: PurgeScope) => Promise<unknown>;
+
+export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: RateLimits, purge: Purge = () => Promise.resolve()): Router {
   const r = Router();
   // Sends are timed stage by stage from here (docs/REALTIME.md, "Measured latency").
   r.post('/conversations/:id/messages', (_req, res, next) => {
@@ -169,7 +173,10 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
   r.delete('/conversations/:id/messages/:messageId', sendLimit, async (req, res) => {
     const conversationId = pathId(req.params.id, 'Conversation');
     const messageId = pathId(req.params.messageId, 'Message');
-    res.json({ message: await deleteForEveryone(pool, { conversationId, messageId, userId: me(res) }) });
+    const message = await deleteForEveryone(pool, { conversationId, messageId, userId: me(res) });
+    // The tombstone marked its attachments deleted in the same transaction; their files go now.
+    await purge({ messageId });
+    res.json({ message });
   });
 
   r.get('/conversations/:id/messages/:messageId/receipts', async (req, res) => {

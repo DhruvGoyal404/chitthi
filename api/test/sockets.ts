@@ -18,7 +18,7 @@ export async function startTestServer(
   const config = testConfig({ DATABASE_URL: apiUrl, DEV_LOGIN: 'true', HOST: '127.0.0.1', PORT: '0' });
   const { logger, lines } = captureLogger(config);
   const rateLimits = createRateLimits(pool, logger, opts.limits ?? GENEROUS, `t${randomBytes(4).toString('hex')}:`);
-  const started = await startApi({ config, logger, pool, rateLimits, ...opts });
+  const started = await startApi({ config, logger, pool, rateLimits, sweepIntervalMs: 0, ...opts });
   await waitUntil(() => started.listener.listening, 5_000, 'listener connected');
   return { ...started, lines };
 }

@@ -37,7 +37,7 @@ const deleteBody = z.object({
   eraseMessages: z.boolean().default(false),
 });
 
-export function meRouter(pool: pg.Pool, store: SessionStore): Router {
+export function meRouter(pool: pg.Pool, store: SessionStore, purge: (scope: { uploaderId: string }) => Promise<unknown> = () => Promise.resolve()): Router {
   const router = Router();
   router.get('/me', requireSession(store), async (_req, res) => {
     const user = await getUser(pool, sessionOf(res).user.id);
@@ -61,6 +61,8 @@ export function meRouter(pool: pg.Pool, store: SessionStore): Router {
       throw new HttpError(400, 'confirmation_mismatch', 'Type your handle exactly to confirm.');
     }
     const result = await deleteAccount(pool, session.user.id, { eraseMessages });
+    // Media marked deleted by the deletion (unsent uploads, and with eraseMessages all of it).
+    await purge({ uploaderId: session.user.id });
     res.clearCookie(SESSION_COOKIE, { path: '/' });
     res.json({ deleted: true, ...result });
   });

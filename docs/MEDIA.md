@@ -75,6 +75,20 @@ The upload is one multipart part, streamed with busboy. It needs a session and a
   `<img>` still shows images, because it ignores the disposition.
 - **Caching.** `Cache-Control: private, max-age=86400` with `Vary: Cookie`: the browser may keep a copy, shared caches may not. An `ETag` lets a revalidation answer `304`.
 
+## Lifecycle: nothing outlives its message
+
+Rows in `attachments` are never deleted. `deleted_at` says the content is gone, and `blob_removed_at` records that the files were removed. Files are removed only after the transaction that marked them commits, and a failed removal stays pending until the sweeper retries it.
+
+| When | What happens |
+|---|---|
+| A message is deleted for everyone | The tombstone marks its attachments deleted in the same transaction (a trigger), and the API removes the files right after commit. Downloads answer 404 from that moment. |
+| An account is deleted | Uploads never sent are removed, in both modes. With "also erase my messages", every message becomes a tombstone, which takes all of the user's media with it. Without it, their media stays for the people they wrote to, as their messages do. |
+| An upload isn't attached within 1 hour | The sweeper marks it deleted and removes its files. A send can no longer use it. |
+| A file exists with no row (a crash between storing and recording) | The sweeper's reconciliation removes stored objects that no row references once they are over an hour old, so an upload in progress is never touched. It also clears stale partial writes from `.tmp`. |
+| A file removal fails (I/O error) | The delete still succeeds for the user. The attachment stays "deleted, not yet removed", and the next sweep retries it. |
+
+**The sweeper** runs inside the API process every 10 minutes and never overlaps itself. One pass marks orphans, removes pending files in batches of 500, then reconciles the store. Test servers run with it switched off, and tests drive it directly.
+
 ## Development note
 
 The disk guard looks at the drive holding `MEDIA_DIR`. On a nearly full development drive it refuses uploads, as it should. Point `MEDIA_DIR` at a roomier drive if that happens; the e2e run uses a temporary folder.

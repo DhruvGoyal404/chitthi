@@ -11,6 +11,7 @@ import { healthRouter } from './health.js';
 import { createRateLimits, limitBy, limitsFor, type RateLimits } from './limits.js';
 import { LocalStorage, type Storage } from './media/storage.js';
 import { downloadsRouter } from './media/downloads.js';
+import { purgeDeleted } from './media/lifecycle.js';
 import { uploadsRouter } from './media/uploads.js';
 import { oauthRouter } from './oauth/router.js';
 import { requireAllowedOrigin } from './origin.js';
@@ -42,10 +43,14 @@ export function createApp({
     req.method === 'GET' && (req.path === '/providers' || req.path === '/identities') ? undefined : (req.ip ?? 'unknown'),
   ));
   api.use(oauthRouter(pool, sessions, config, logger));
-  api.use(meRouter(pool, sessions));
+  // After a commit that marked attachments deleted: remove their files now. Never fails the
+  // request (the delete already happened); anything left is the sweeper's to retry.
+  const purge = (scope: { messageId?: string; uploaderId?: string }) =>
+    purgeDeleted(pool, storage, logger, scope).catch((err: unknown) => { logger.warn({ err }, 'post-delete media purge failed; the sweeper will retry'); });
+  api.use(meRouter(pool, sessions, purge));
   api.use(uploadsRouter(pool, sessions, storage, rateLimits, logger));
   api.use(downloadsRouter(pool, sessions, storage, logger));
-  api.use(apiRoutes(pool, sessions, rateLimits));
+  api.use(apiRoutes(pool, sessions, rateLimits, purge));
   if (config.devLogin) {
     logger.warn('dev login enabled: anyone can sign in as any handle');
     api.use(devLoginRouter(config.nodeEnv, pool, sessions));

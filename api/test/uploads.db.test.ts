@@ -14,6 +14,7 @@ import { diskGuard } from '../src/media/uploads.js';
 import { LocalStorage, StorageError, type Storage } from '../src/media/storage.js';
 import { as, GENEROUS, signIn, testApp, type Signed } from './apphelpers.js';
 import { appPool } from './dbhelpers.js';
+import { over } from './mediahelpers.js';
 import { captureLogger, testConfig, WEB_ORIGIN } from './helpers.js';
 
 const apiUrl = inject('apiDbUrl');
@@ -197,12 +198,10 @@ describe.skipIf(!apiUrl)('POST /api/uploads', () => {
   });
 
   it('a disk write failure answers 503 cleanly and keeps nothing', async () => {
-    const failing: Storage = {
+    const failing = over(storage, {
       put: () => Promise.reject(new StorageError('ENOSPC: no space left on device')),
-      get: (k) => storage.get(k),
-      delete: (k) => storage.delete(k),
       space: () => Promise.resolve({ free: 500 * 1024 ** 3, total: 1000 * 1024 ** 3 }),
-    };
+    });
     const app = appWith({}, failing);
     const u = await signIn(app, 'df');
     const res = await upload(app, u, b('%PDF-1.4'), 'a.pdf');
@@ -214,7 +213,7 @@ describe.skipIf(!apiUrl)('POST /api/uploads', () => {
   it('the disk guard refuses uploads below max(15 %, 2 GB) free with 507; text messages keep working', async () => {
     const GB = 1024 ** 3;
     const reading = { free: 1 * GB, total: 100 * GB };
-    const fake: Storage = { put: (s, o) => storage.put(s, o), get: (k) => storage.get(k), delete: (k) => storage.delete(k), space: () => Promise.resolve(reading) };
+    const fake = over(storage, { space: () => Promise.resolve(reading) });
     const app = appWith({}, fake);
     const [u, w] = [await signIn(app, 'dg'), await signIn(app, 'dg')];
     const full = await upload(app, u, b('note'), 'a.txt');
