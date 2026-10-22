@@ -154,7 +154,8 @@ export function uploadsRouter(pool: pg.Pool, sessions: SessionStore, storage: St
     const stored = await new Promise<Stored>((resolve, reject) => {
       let bb: busboy.Busboy;
       try {
-        bb = busboy({ headers: req.headers, limits: { files: 1, fields: 0, fileSize: FILE_MAX_BYTES + 1, headerPairs: 20 } });
+        // defParamCharset: busboy reads the filename parameter as Latin-1 unless told otherwise.
+        bb = busboy({ headers: req.headers, defParamCharset: 'utf8', limits: { files: 1, fields: 0, fileSize: FILE_MAX_BYTES + 1, headerPairs: 20 } });
       } catch {
         reject(new HttpError(400, 'invalid_request', 'Malformed multipart body.'));
         return;

@@ -48,6 +48,33 @@ The upload is one multipart part, streamed with busboy. It needs a session and a
 
 **Failures are calm and specific:** 415, 413, 429 (`details.limit` is `uploadCount` or `uploadBytes`), 507 when the disk is nearly full, and 503 `storage_unavailable` when a write fails. Multipart mistakes (no file, two files, extra fields, malformed) are 400, and anything stored for a refused upload is removed.
 
+## Sending
+
+`POST /api/conversations/:id/messages {clientMsgId, body?, attachmentIds?}`:
+
+- **Up to 10 attachment ids, in display order.** With at least one, the caption (`body`) is optional.
+- **Linking.** In the send transaction each id must be the sender's own upload, not yet attached and not deleted. Every other case gets the same `400 attachment_unavailable`, so nobody can probe other people's upload ids.
+- **A refused send uses nothing up.** It rolls back, and its uploads stay free to use. The database enforces the rest: one message per attachment, links only to a message created in the same transaction, and `attachment_count` checked at commit.
+- **Idempotent like any send.** Without attachments the idempotency hash is the body's, exactly as before. With attachments it covers the caption and the ordered ids, so a retry must carry the same ones; a different payload under the same `clientMsgId` is `409`.
+- **What clients see.** Messages carry `attachments: [{id, kind, mime, size, name, width, height, placeholder}]` in history, catch-up, acks and `message:new` / `message:updated` pushes. They never carry storage keys. A tombstone carries none.
+- **Same rules as text.** Blocks, deleted accounts, membership and rate limits apply exactly as they do to text.
+
+## Downloading
+
+`GET /api/attachments/:id` (the file) and `GET /api/attachments/:id/thumb` (images only: the 480 px WebP).
+
+- **Access is checked like history, on every request.** The attachment must belong to a live message inside one of the caller's membership windows. A member who left can still fetch media sent before they left, and nothing sent after.
+- **Everyone else gets the same `404`:** strangers, unknown or malformed ids, unattached uploads (even for their uploader), media of deleted messages, and media sent after someone left. Never `403`. No session is `401`.
+- **Ids are random v4 UUIDs.** They carry no timestamp and can't be guessed.
+- **Never served inline as a document.** Headers:
+  - `Content-Disposition: attachment` with an ASCII fallback plus the exact UTF-8 name (RFC 6266/5987);
+  - `X-Content-Type-Options: nosniff`;
+  - `Content-Security-Policy: default-src 'none'; sandbox`;
+  - text served as `text/plain; charset=utf-8`.
+
+  `<img>` still shows images, because it ignores the disposition.
+- **Caching.** `Cache-Control: private, max-age=86400` with `Vary: Cookie`: the browser may keep a copy, shared caches may not. An `ETag` lets a revalidation answer `304`.
+
 ## Development note
 
 The disk guard looks at the drive holding `MEDIA_DIR`. On a nearly full development drive it refuses uploads, as it should. Point `MEDIA_DIR` at a roomier drive if that happens; the e2e run uses a temporary folder.

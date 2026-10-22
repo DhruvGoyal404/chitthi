@@ -19,7 +19,7 @@ const uuid = z.uuid();
 const seq = z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const limit = z.coerce.number().int().min(1).max(MAX_PAGE).optional();
 
-const sendBody = z.object({ clientMsgId: uuid, body: z.string() });
+const sendBody = z.object({ clientMsgId: uuid, body: z.string().nullish(), attachmentIds: z.array(z.string()).max(10).optional() });
 const editBody = z.object({ body: z.string() });
 const directBody = z.object({ userId: uuid });
 const groupBody = z.object({ title: z.string(), memberIds: z.array(uuid).max(255).default([]) });
@@ -148,10 +148,10 @@ export function apiRoutes(pool: pg.Pool, sessions: SessionStore, rateLimits: Rat
 
   r.post('/conversations/:id/messages', sendLimit, async (req, res) => {
     const conversationId = pathId(req.params.id, 'Conversation');
-    const { clientMsgId, body } = sendBody.parse(req.body);
+    const { clientMsgId, body, attachmentIds } = sendBody.parse(req.body);
     const timer = timerOf(res);
     timer?.mark('validate');
-    const { message, duplicate } = await sendMessage(pool, { conversationId, senderId: me(res), clientMsgId, body }, timer);
+    const { message, duplicate } = await sendMessage(pool, { conversationId, senderId: me(res), clientMsgId, body, attachmentIds }, timer);
     if (timer) {
       if (!duplicate) traceCommit(message.id, timer);
       res.set('Server-Timing', timer.serverTiming());

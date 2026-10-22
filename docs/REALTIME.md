@@ -84,6 +84,8 @@ Client → server (anything else disconnects):
 
 Malformed payloads disconnect. Inbound events pass a token bucket (burst 20, 5/s); exceeding it disconnects.
 
+Since Phase 6, a message also carries `attachments` (display metadata only, never storage keys; see [MEDIA.md](MEDIA.md)). A tombstone carries none.
+
 ## 6. Client sync contract (`web/src/sync/sync.ts`)
 
 Per conversation the client keeps `lastSeq` (every visible message up to it is stored) and `changeCursor` (every change up to it is applied).

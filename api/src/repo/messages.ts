@@ -4,6 +4,7 @@ import { HttpError } from '../errors.js';
 import { assertUuid, readOnly, requireActive, requireReader, visibleTo } from './access.js';
 import { directBlockError } from './blocks.js';
 import { isUniqueViolation, violates, withTx } from './pg.js';
+import type { AttachmentInfo } from '../media/uploads.js';
 import type { StageTimer } from '../timing.js';
 import { codePointLength } from './text.js';
 
@@ -22,6 +23,8 @@ export type Message = {
   createdAt: Date;
   editedAt: Date | null;
   deletedAt: Date | null;
+  /** In order; display metadata only (never storage keys). Empty for tombstones. */
+  attachments: AttachmentInfo[];
 };
 
 export const MAX_BODY_CHARS = 4000;
@@ -29,7 +32,12 @@ export const MAX_PAGE = 200;
 
 export const MSG_COLUMNS = `m.id, m.conversation_id AS "conversationId", m.seq, m.updated_change_seq AS "changeSeq",
   m.sender_id AS "senderId", m.client_msg_id AS "clientMsgId", m.kind, m.body, m.meta,
-  m.created_at AS "createdAt", m.edited_at AS "editedAt", m.deleted_at AS "deletedAt"`;
+  m.created_at AS "createdAt", m.edited_at AS "editedAt", m.deleted_at AS "deletedAt",
+  COALESCE((SELECT json_agg(json_build_object('id', a.id, 'kind', a.kind, 'mime', a.mime, 'size', a.byte_size, 'name', a.file_name,
+                                              'width', a.width, 'height', a.height, 'placeholder', a.placeholder) ORDER BY a.position)
+              FROM attachments a WHERE a.message_id = m.id AND a.deleted_at IS NULL AND m.deleted_at IS NULL), '[]'::json) AS attachments`;
+
+export const MAX_ATTACHMENTS = 10;
 
 /** Same rule as the messages_live_text constraint: 1–4000 code points, not blank. */
 function validateBody(body: unknown): string {
@@ -44,7 +52,15 @@ function validateBody(body: unknown): string {
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest();
 const pageLimit = (limit: number) => Math.min(Math.max(Math.trunc(limit) || 1, 1), MAX_PAGE);
 
-export type SendInput = { conversationId: string; senderId: string; clientMsgId: string; body: string };
+export type SendInput = {
+  conversationId: string;
+  senderId: string;
+  clientMsgId: string;
+  /** The text, or with attachments an optional caption. */
+  body?: string | null | undefined;
+  /** The sender's own unattached uploads, in display order (at most 10). */
+  attachmentIds?: readonly string[] | undefined;
+};
 export type SendResult = { message: Message; duplicate: boolean };
 
 /**
@@ -59,8 +75,15 @@ export type SendResult = { message: Message; duplicate: boolean };
 export async function sendMessage(pool: pg.Pool, input: SendInput, timer?: StageTimer): Promise<SendResult> {
   assertUuid(input.conversationId, 'Conversation');
   assertUuid(input.clientMsgId, 'clientMsgId', 400);
-  const body = validateBody(input.body);
-  const hash = sha256(body);
+  const ids = input.attachmentIds ?? [];
+  if (ids.length > MAX_ATTACHMENTS) throw new HttpError(400, 'invalid_request', `At most ${String(MAX_ATTACHMENTS)} attachments per message`);
+  if (new Set(ids).size !== ids.length) throw new HttpError(400, 'invalid_request', 'An attachment is listed twice');
+  for (const id of ids) assertUuid(id, 'Attachment', 400);
+  const captionless = ids.length > 0 && (input.body === undefined || input.body === null || input.body === '');
+  const body = captionless ? null : validateBody(input.body);
+  // Without attachments the hash is the body's, as it always was (old retries still match);
+  // with them it covers the caption and the ordered ids, so a retry must carry the same.
+  const hash = ids.length === 0 ? sha256(body ?? '') : sha256(JSON.stringify({ body, attachments: ids }));
   timer?.mark('validate');
 
   const resolveExisting = async (): Promise<SendResult | undefined> => {
@@ -85,12 +108,29 @@ export async function sendMessage(pool: pg.Pool, input: SendInput, timer?: Stage
 
   try {
     const message = await withTx(pool, async (tx) => {
-      const { rows: [row] } = await tx.query<Message>(
-        `INSERT INTO messages AS m (conversation_id, sender_id, client_msg_id, send_body_sha256, kind, body)
-         VALUES ($1, $2, $3, $4, 'text', $5) RETURNING ${MSG_COLUMNS}`,
-        [input.conversationId, input.senderId, input.clientMsgId, hash, body],
+      const { rows: [inserted] } = await tx.query<Message>(
+        `INSERT INTO messages AS m (conversation_id, sender_id, client_msg_id, send_body_sha256, kind, body, attachment_count)
+         VALUES ($1, $2, $3, $4, 'text', $5, $6) RETURNING ${MSG_COLUMNS}`,
+        [input.conversationId, input.senderId, input.clientMsgId, hash, body, ids.length],
       );
-      if (!row) throw new Error('insert returned no row');
+      if (!inserted) throw new Error('insert returned no row');
+      let row = inserted;
+      if (ids.length > 0) {
+        // Only the sender's own uploads that are still unattached and not deleted. One answer
+        // for every other case, so nobody can probe someone else's attachment ids.
+        const { rowCount } = await tx.query(
+          `UPDATE attachments a SET message_id = $1, position = (x.pos - 1)::smallint
+             FROM unnest($2::uuid[]) WITH ORDINALITY AS x(id, pos)
+            WHERE a.id = x.id AND a.uploader_id = $3 AND a.message_id IS NULL AND a.deleted_at IS NULL`,
+          [inserted.id, ids, input.senderId],
+        );
+        if (rowCount !== ids.length) {
+          throw new HttpError(400, 'attachment_unavailable', "An attachment isn't available any more. Attach it again.");
+        }
+        const { rows: [linked] } = await tx.query<Message>(`SELECT ${MSG_COLUMNS} FROM messages m WHERE m.id = $1`, [inserted.id]);
+        if (!linked) throw new Error('message vanished');
+        row = linked;
+      }
       // Decision 3: your own message marks everything up to it as read (and delivered).
       await tx.query(
         `UPDATE read_markers SET last_read_seq = GREATEST(last_read_seq, $3), last_delivered_seq = GREATEST(last_delivered_seq, $3)

@@ -2,6 +2,7 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import type pg from 'pg';
 import type { Logger } from 'pino';
 import { createApp } from './app.js';
+import { LocalStorage, type Storage } from './media/storage.js';
 import type { Config } from './config.js';
 import { createRateLimits, limitsFor, type RateLimits } from './limits.js';
 import { attachFanout, CONV_CHANNEL } from './realtime/fanout.js';
@@ -26,6 +27,8 @@ export type StartOptions = {
   logger: Logger;
   pool: pg.Pool;
   rateLimits?: RateLimits;
+  /** Where media lives (default: the local driver on config.mediaDir). */
+  storage?: Storage;
   /** Overrides for tests (inbound rate limit, listener backoff). */
   realtime?: Pick<RealtimeOptions, 'rateLimit'>;
   listenerBackoff?: { minMs: number; maxMs: number };
@@ -40,7 +43,8 @@ export type StartOptions = {
 export async function startApi(opts: StartOptions): Promise<Started> {
   const { config, logger, pool } = opts;
   const rateLimits = opts.rateLimits ?? createRateLimits(pool, logger, limitsFor(config));
-  const app = createApp({ config, logger, pool, rateLimits });
+  const storage = opts.storage ?? new LocalStorage(config.mediaDir);
+  const app = createApp({ config, logger, pool, rateLimits, storage });
   const httpServer = createServer(app);
   const listener = new PgListener(config.databaseUrl, [SESSION_CHANNEL, CONV_CHANNEL], logger, opts.listenerBackoff);
   const typing = createTyping(pool, opts.tuning?.typing ?? DEFAULT_TYPING);

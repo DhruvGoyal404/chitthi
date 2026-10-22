@@ -10,6 +10,7 @@ import { errorHandler, notFound } from './errors.js';
 import { healthRouter } from './health.js';
 import { createRateLimits, limitBy, limitsFor, type RateLimits } from './limits.js';
 import { LocalStorage, type Storage } from './media/storage.js';
+import { downloadsRouter } from './media/downloads.js';
 import { uploadsRouter } from './media/uploads.js';
 import { oauthRouter } from './oauth/router.js';
 import { requireAllowedOrigin } from './origin.js';
@@ -43,6 +44,7 @@ export function createApp({
   api.use(oauthRouter(pool, sessions, config, logger));
   api.use(meRouter(pool, sessions));
   api.use(uploadsRouter(pool, sessions, storage, rateLimits, logger));
+  api.use(downloadsRouter(pool, sessions, storage, logger));
   api.use(apiRoutes(pool, sessions, rateLimits));
   if (config.devLogin) {
     logger.warn('dev login enabled: anyone can sign in as any handle');
