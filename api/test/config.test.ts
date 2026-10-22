@@ -19,6 +19,18 @@ describe('config', () => {
     expect(loadConfig({ NODE_ENV: 'production', ...db, MEDIA_DIR: abs }).mediaDir).toBe(abs);
   });
 
+  it('disk guard: production keeps max(15 %, 2 GB) and refuses to start with an override; development may loosen it', () => {
+    const db = { DATABASE_URL: 'postgres://u:p@127.0.0.1:5435/chitthi' };
+    const prod = { NODE_ENV: 'production', ...db, MEDIA_DIR: process.platform === 'win32' ? 'D:\\media' : '/var/lib/chitthi/media' };
+    expect(loadConfig(prod).diskGuard).toEqual({ minFreeRatio: 0.15, minFreeBytes: 2 * 1024 ** 3 });
+    expect(() => loadConfig({ ...prod, MEDIA_MIN_FREE_PERCENT: '5' })).toThrow(/MEDIA_MIN_FREE_PERCENT/);
+    expect(() => loadConfig({ ...prod, MEDIA_MIN_FREE_BYTES: '1073741824' })).toThrow(/MEDIA_MIN_FREE_BYTES/);
+    expect(loadConfig({ NODE_ENV: 'development', ...db }).diskGuard).toEqual({ minFreeRatio: 0.15, minFreeBytes: 2 * 1024 ** 3 });
+    expect(loadConfig({ NODE_ENV: 'development', ...db, MEDIA_MIN_FREE_PERCENT: '5', MEDIA_MIN_FREE_BYTES: '1073741824' }).diskGuard)
+      .toEqual({ minFreeRatio: 0.05, minFreeBytes: 1024 ** 3 });
+    expect(() => loadConfig({ NODE_ENV: 'development', ...db, MEDIA_MIN_FREE_PERCENT: '150' })).toThrow(/MEDIA_MIN_FREE_PERCENT/);
+  });
+
   it('rejects bad values and names the key without echoing the value', () => {
     const badUrl = `mysql://root:${DB_PASSWORD}@db/x`;
     let message = '';

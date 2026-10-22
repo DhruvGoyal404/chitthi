@@ -12,7 +12,7 @@ import { createRateLimits, limitBy, limitsFor, type RateLimits } from './limits.
 import { LocalStorage, type Storage } from './media/storage.js';
 import { downloadsRouter } from './media/downloads.js';
 import { purgeDeleted } from './media/lifecycle.js';
-import { uploadsRouter } from './media/uploads.js';
+import { diskGuard, uploadsRouter } from './media/uploads.js';
 import { oauthRouter } from './oauth/router.js';
 import { requireAllowedOrigin } from './origin.js';
 import { apiRoutes } from './routes.js';
@@ -48,7 +48,7 @@ export function createApp({
   const purge = (scope: { messageId?: string; uploaderId?: string }) =>
     purgeDeleted(pool, storage, logger, scope).catch((err: unknown) => { logger.warn({ err }, 'post-delete media purge failed; the sweeper will retry'); });
   api.use(meRouter(pool, sessions, purge));
-  api.use(uploadsRouter(pool, sessions, storage, rateLimits, logger));
+  api.use(uploadsRouter(pool, sessions, storage, rateLimits, logger, diskGuard(storage, logger, config.diskGuard)));
   api.use(downloadsRouter(pool, sessions, storage, logger));
   api.use(apiRoutes(pool, sessions, rateLimits, purge));
   if (config.devLogin) {

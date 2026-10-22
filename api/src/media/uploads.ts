@@ -4,6 +4,7 @@ import type pg from 'pg';
 import type { Logger } from 'pino';
 import { Readable } from 'node:stream';
 import { requireSession, sessionOf } from '../auth.js';
+import { DISK_GUARD_DEFAULTS } from '../config.js';
 import { HttpError } from '../errors.js';
 import type { RateLimits } from '../limits.js';
 import type { SessionStore } from '../sessions.js';
@@ -44,7 +45,7 @@ const IMAGE_ERRORS: Record<ImageRejected['reason'], () => HttpError> = {
  * logged at most once an hour.
  */
 export function diskGuard(storage: Pick<Storage, 'space'>, logger: Logger, opts: { minFreeBytes?: number; minFreeRatio?: number; now?: () => number } = {}) {
-  const { minFreeBytes = 2 * 1024 ** 3, minFreeRatio = 0.15, now = Date.now } = opts;
+  const { minFreeBytes = DISK_GUARD_DEFAULTS.minFreeBytes, minFreeRatio = DISK_GUARD_DEFAULTS.minFreeRatio, now = Date.now } = opts;
   let cached: { at: number; ok: boolean } | undefined;
   let warnedAt = -Infinity;
   return async (): Promise<void> => {

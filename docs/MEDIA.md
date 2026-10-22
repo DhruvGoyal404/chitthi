@@ -112,6 +112,20 @@ Rows in `attachments` are never deleted. `deleted_at` says the content is gone, 
 - The only URLs built from attachment data are `/api/attachments/<id>` and `/api/attachments/<id>/thumb`, and only when the id looks like a UUID.
 - The page's CSP allows `blob:` images (local previews before sending) and `data:` images (placeholders). Everything else comes from the same origin, and the media e2e test fails on any CSP violation.
 
-## Development note
+## Development
 
-The disk guard looks at the drive holding `MEDIA_DIR`. On a nearly full development drive it refuses uploads, as it should. Point `MEDIA_DIR` at a roomier drive if that happens; the e2e run uses a temporary folder.
+- **Where uploads go.** In development, media is stored in `<repo>/.data/media`, which is git-ignored.
+- **Disk guard thresholds.**
+  - The guard looks at the drive holding `MEDIA_DIR`.
+  - On a nearly full development drive, lower its thresholds with `MEDIA_MIN_FREE_PERCENT` and `MEDIA_MIN_FREE_BYTES` (see `.env.example`).
+  - These two are accepted only with `NODE_ENV` development or test. With `NODE_ENV=production` the API refuses to start if either is set, so production is always max(15 %, 2 GB). `config.test.ts` proves both.
+- **`npm run dev:reset-media` removes every attachment, so a manual test pass leaves nothing behind.**
+  - It runs as the database owner, in one transaction:
+    1. Messages that carried media become tombstones.
+    2. Attachment rows are deleted.
+    3. Upload quota counters are cleared.
+  - Then `.data/media` is removed.
+  - It refuses `NODE_ENV=production`, a database not on this machine, and a `MEDIA_DIR` outside `<repo>/.data`.
+- **Test runs keep their media elsewhere.**
+  - API tests use temporary folders, and report plenty of free space unless they are testing the guard.
+  - e2e runs use a temporary folder locally, and RAM-backed `/dev/shm` in CI.

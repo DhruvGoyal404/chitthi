@@ -53,6 +53,10 @@ const schema = z
     // Where uploaded media is stored (local filesystem driver). Outside any web root; required in
     // production, defaults to <repo>/.data/media elsewhere.
     MEDIA_DIR: optional,
+    // Development and tests only: loosen the disk guard (default: refuse uploads below
+    // max(15 %, 2 GB) free). Refused in production, where the rule is fixed.
+    MEDIA_MIN_FREE_PERCENT: z.preprocess((v) => (v === '' ? undefined : v), z.coerce.number().min(0).max(100).optional()),
+    MEDIA_MIN_FREE_BYTES: z.preprocess((v) => (v === '' ? undefined : v), z.coerce.number().int().min(0).optional()),
   })
   .superRefine((env, ctx) => {
     if (env.DEV_LOGIN && !devLoginAllowed(env.NODE_ENV)) {
@@ -75,6 +79,9 @@ const schema = z
     }
     if (env.NODE_ENV === 'production') {
       if (env.MEDIA_DIR === undefined) ctx.addIssue({ code: 'custom', path: ['MEDIA_DIR'], message: 'required in production' });
+      for (const key of ['MEDIA_MIN_FREE_PERCENT', 'MEDIA_MIN_FREE_BYTES'] as const) {
+        if (env[key] !== undefined) ctx.addIssue({ code: 'custom', path: [key], message: 'development and test only: production always refuses uploads below max(15 %, 2 GB) free' });
+      }
       for (const key of ENDPOINT_OVERRIDES) {
         if (env[key] !== undefined) ctx.addIssue({ code: 'custom', path: [key], message: 'endpoint overrides are for tests only' });
       }
@@ -91,6 +98,9 @@ export type GoogleConfig = {
   jwksUrl: string;
 };
 export type GithubConfig = { clientId: string; clientSecret: string; authUrl: string; tokenUrl: string; apiUrl: string };
+
+/** The production rule: refuse new uploads below max(15 %, 2 GB) free. */
+export const DISK_GUARD_DEFAULTS = { minFreeRatio: 0.15, minFreeBytes: 2 * 1024 ** 3 } as const;
 
 /** Dev and test default: <repo>/.data/media (git-ignored), the same from src/ and dist/. */
 const DEFAULT_MEDIA_DIR = resolve(fileURLToPath(new URL('../../.data/media', import.meta.url)));
@@ -112,6 +122,8 @@ export type Config = {
   github: GithubConfig | undefined;
   /** Absolute directory of the local media store. */
   mediaDir: string;
+  /** The disk guard: refuse uploads below max(minFreeRatio of the disk, minFreeBytes) free. */
+  diskGuard: { minFreeRatio: number; minFreeBytes: number };
 };
 
 export class ConfigError extends Error {
@@ -161,6 +173,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     google,
     github,
     mediaDir: e.MEDIA_DIR ?? DEFAULT_MEDIA_DIR,
+    // The overrides can only be present outside production (refused above).
+    diskGuard: {
+      minFreeRatio: e.MEDIA_MIN_FREE_PERCENT === undefined ? DISK_GUARD_DEFAULTS.minFreeRatio : e.MEDIA_MIN_FREE_PERCENT / 100,
+      minFreeBytes: e.MEDIA_MIN_FREE_BYTES ?? DISK_GUARD_DEFAULTS.minFreeBytes,
+    },
   };
 }
 

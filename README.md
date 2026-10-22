@@ -36,6 +36,8 @@ npm run dev:api             # http://127.0.0.1:8082/api/health
 npm run dev:web             # http://localhost:5175
 ```
 
+Uploaded media goes to `.data/media` in the repo (git-ignored). `npm run dev:reset-media` deletes all of it, files and attachment rows, when you are done testing. On a nearly full drive, the dev-only `MEDIA_MIN_FREE_PERCENT` / `MEDIA_MIN_FREE_BYTES` in `.env.example` loosen the upload disk guard. See [docs/MEDIA.md](docs/MEDIA.md).
+
 To sign in with Google or GitHub, set the client id and secret pairs (in `.env` or `api/.env`) and register `http://localhost:5175/api/auth/{google,github}/callback` as redirect URIs. Without them, development uses the `DEV_LOGIN` handle shortcut. See [docs/AUTH.md](docs/AUTH.md).
 
 ## Docs
