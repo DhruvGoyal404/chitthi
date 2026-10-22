@@ -22,6 +22,27 @@ async function person(browser: Browser, first: string, displayName: string, colo
 }
 const post = async <T>(p: Person, path: string, data: object): Promise<T> =>
   (await (await p.req.post(`/api${path}`, { data, headers: { Origin: ORIGIN } })).json()) as T;
+/** A soft dusk gradient, so the photo in the screenshots looks like a photo. */
+async function landscape(width: number, height: number): Promise<Buffer> {
+  const px = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const t = y / height;
+      const hill = y > height * (0.62 + 0.08 * Math.sin(x / 70));
+      const i = (y * width + x) * 3;
+      px[i] = hill ? 40 + 30 * t : 240 - 90 * t;
+      px[i + 1] = hill ? 70 + 20 * t : 170 - 60 * t;
+      px[i + 2] = hill ? 60 : 120 + 80 * t;
+    }
+  }
+  // sharp comes from the API workspace; loaded only when screenshots are actually made.
+  const { default: sharp } = await import('sharp');
+  return sharp(px, { raw: { width, height, channels: 3 } }).jpeg({ quality: 85 }).toBuffer();
+}
+const upload = async (p: Person, name: string, mimeType: string, buffer: Buffer) => {
+  const res = await p.req.post('/api/uploads', { multipart: { file: { name, mimeType, buffer } }, headers: { Origin: ORIGIN } });
+  return ((await res.json()) as { attachment: { id: string } }).attachment.id;
+};
 const say = async (p: Person, conv: string, body: string) =>
   (await post<{ message: { id: string; seq: number } }>(p, `/conversations/${conv}/messages`, { clientMsgId: randomUUID(), body })).message;
 
@@ -48,6 +69,10 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['desktop
       const { conversation: trip } = await post<{ conversation: { id: string } }>(asha, '/conversations', { title: 'Weekend trip', memberIds: [ravi.id, meera.id] });
       await say(meera, trip.id, 'Train tickets are booked for Saturday 🚆');
       await say(ravi, trip.id, 'I will bring the snacks.');
+      const hills = await landscape(1200, 800);
+      const photoId = await upload(meera, 'hills.jpg', 'image/jpeg', hills);
+      const ticketId = await upload(meera, 'train-tickets.pdf', 'application/pdf', Buffer.from('%PDF-1.4\n% tickets\n'));
+      await post(meera, `/conversations/${trip.id}/messages`, { clientMsgId: randomUUID(), body: 'The view from last time. Tickets attached.', attachmentIds: [photoId, ticketId] });
       const plan = await say(asha, trip.id, 'Perfect. Meet at platform 4 at 8:15.');
       await post(meera, `/conversations/${trip.id}/read`, { seq: plan.seq });
 
@@ -79,6 +104,14 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['desktop
       await asha.page.waitForTimeout(600);
       await shot(asha.page, 'group');
 
+      // The photo, full size.
+      await asha.page.getByRole('textbox', { name: 'Message' }).fill('');
+      await asha.page.getByRole('button', { name: 'Open photo hills.jpg' }).click();
+      const lightbox = asha.page.getByRole('dialog', { name: 'hills.jpg' });
+      await expect.poll(() => lightbox.getByRole('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
+      await shot(asha.page, 'photo');
+      await asha.page.keyboard.press('Escape');
+
       await asha.page.goto(`/c/${trip.id}/m/${plan.id}`);
       await expect(asha.page.getByRole('heading', { name: 'Message info' })).toBeVisible();
       await expect(asha.page.getByText('Read by')).toBeVisible();
@@ -89,9 +122,21 @@ for (const [label, viewport] of [['390', { width: 390, height: 844 }], ['desktop
       await shot(asha.page, 'group-info');
 
       await asha.page.goto('/new');
-      await asha.page.getByLabel('Find someone by handle').fill('meera');
+      // The full handle: search shows at most 8 people, and earlier runs left many "meera_…" users behind.
+      await asha.page.getByLabel('Find someone by handle').fill(meera.handle);
       await expect(asha.page.getByRole('button', { name: new RegExp(meera.handle) })).toBeVisible();
       await shot(asha.page, 'new-chat');
+
+      // Attaching: files wait in the tray above the composer.
+      await asha.page.goto(`/c/${dm.id}`);
+      await asha.page.getByTestId('file-picker').setInputFiles([
+        { name: 'hills.jpg', mimeType: 'image/jpeg', buffer: hills },
+        { name: 'recipe.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n') },
+      ]);
+      await expect(asha.page.getByRole('log', { name: 'Messages' }).getByText('Call me after 7?')).toBeVisible();
+      await asha.page.getByRole('textbox', { name: 'Message' }).fill('For your album');
+      await expect(asha.page.getByRole('list', { name: 'Attachments to send' }).getByRole('listitem')).toHaveCount(2);
+      await shot(asha.page, 'attach');
 
       await asha.page.goto('/settings');
       await expect(asha.page.getByLabel('Display name')).toHaveValue('Asha Rao');

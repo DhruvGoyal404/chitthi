@@ -14,6 +14,7 @@ The look is the old blue inland letter: pale blue paper, letters with a folded c
 |---|---|
 | <img src="docs/img/chat-390.png" width="260" alt="A conversation on a phone"> | <img src="docs/img/group-desktop.png" width="520" alt="Inbox and a group conversation on desktop"> |
 | <img src="docs/img/inbox-390-dark.png" width="260" alt="The inbox in dark mode"> | <img src="docs/img/message-info-desktop-dark.png" width="520" alt="Who read a group message, in dark mode"> |
+| <img src="docs/img/photo-390.png" width="260" alt="A photo opened full size on a phone"> | <img src="docs/img/attach-desktop.png" width="520" alt="A photo and a PDF waiting in the tray above the composer"> |
 
 Every screen, at 390 px and on desktop, in light and dark: [docs/img/](docs/img/). Regenerate them with `SCREENSHOTS=1 npm run e2e -w web -- e2e/screenshots.spec.ts --project=desktop`.
 
