@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { Icon } from '../components/ui.js';
 import { clock, fullWhen } from '../lib/format.js';
 import type { Message } from '../lib/types.js';
+import { Attachments, PendingFiles } from './Attachments.js';
 import { Linkified } from './Linkified.js';
 import { isPending, type Pending } from './outbox.js';
 import { TickIcon } from './TickIcon.js';
@@ -17,15 +18,19 @@ type Props = {
   onEdit?: () => void;
   onDelete?: () => void;
   onRetry?: () => void;
+  /** Pending sends with files: stop uploading, or discard a failed one. */
+  onCancel?: () => void;
 };
 
 /** One letter. Text only (never HTML); tombstones read "message deleted". */
-export function MessageBubble({ item, mine, senderName, tick, infoHref, onEdit, onDelete, onRetry }: Props) {
+export function MessageBubble({ item, mine, senderName, tick, infoHref, onEdit, onDelete, onRetry, onCancel }: Props) {
   const stored = 'seq' in item ? item : null;
   const deleted = stored?.deletedAt != null;
   const body = stored ? stored.body : item.body;
   const failed = isPending(item) && item.status === 'failed' ? item : null;
   const canAct = stored !== null && mine && !deleted && stored.kind === 'text';
+  const attachments = stored && !deleted ? (stored.attachments ?? []) : [];
+  const pendingFiles = isPending(item) ? (item.files ?? []) : [];
 
   return (
     <div className={`group flex px-3 py-1 ${mine ? 'justify-end' : 'justify-start'}`}>
@@ -34,9 +39,15 @@ export function MessageBubble({ item, mine, senderName, tick, infoHref, onEdit, 
         {deleted ? (
           <p className="italic text-ink-soft">message deleted</p>
         ) : (
-          <p className="whitespace-pre-wrap break-words font-[family-name:var(--font-letter)] text-[0.975rem] leading-snug text-ink">
-            <Linkified text={body ?? ''} />
-          </p>
+          <>
+            {attachments.length > 0 && <Attachments items={attachments} />}
+            {pendingFiles.length > 0 && <PendingFiles files={pendingFiles} />}
+            {body !== null && body !== '' && (
+              <p className="whitespace-pre-wrap break-words font-[family-name:var(--font-letter)] text-[0.975rem] leading-snug text-ink">
+                <Linkified text={body} />
+              </p>
+            )}
+          </>
         )}
         <div className="mt-0.5 flex items-center justify-end gap-1.5 text-[0.7rem] text-ink-soft">
           {stored?.editedAt && !deleted && <span>edited</span>}
@@ -47,13 +58,21 @@ export function MessageBubble({ item, mine, senderName, tick, infoHref, onEdit, 
           {canAct && <Actions onEdit={onEdit} onDelete={onDelete} infoHref={infoHref} />}
         </div>
         {failed && (
-          <div className="mt-1 flex items-center justify-end gap-2 text-xs text-stamp">
+          <div className="mt-1 flex flex-wrap items-center justify-end gap-2 text-xs text-stamp">
             <span role="alert">{failed.error ?? failed.note ?? 'Not sent.'}</span>
             {onRetry && !failed.error && (
               <button type="button" onClick={onRetry} className="inline-flex min-h-8 items-center gap-1 rounded border border-stamp px-2 font-medium">
                 <Icon.Retry width={14} height={14} /> Retry
               </button>
             )}
+            {onCancel && pendingFiles.length > 0 && (
+              <button type="button" onClick={onCancel} className="inline-flex min-h-8 items-center rounded border border-paper-edge px-2 font-medium text-ink">Discard</button>
+            )}
+          </div>
+        )}
+        {!failed && onCancel && pendingFiles.some((f) => f.status !== 'done') && (
+          <div className="mt-1 flex justify-end">
+            <button type="button" onClick={onCancel} className="inline-flex min-h-8 items-center rounded border border-paper-edge px-2 text-xs font-medium text-ink">Cancel</button>
           </div>
         )}
       </div>

@@ -16,7 +16,8 @@ export const WEB_CSP = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self'",
-  "img-src 'self' https: data:",
+  // blob: only for previews of the user's own files before they are sent.
+  "img-src 'self' https: data: blob:",
   "font-src 'self'",
   "connect-src 'self'",
   "object-src 'none'",

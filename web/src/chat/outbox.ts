@@ -1,10 +1,28 @@
-import type { Message } from '../lib/types.js';
+import type { Attachment, Message } from '../lib/types.js';
+
+/** A file travelling with a pending message: uploaded first, then referenced by the send. */
+export type PendingFile = {
+  localId: string;
+  file: File;
+  name: string;
+  size: number;
+  kind: 'image' | 'file';
+  /** blob: URL of a local image, shown until the stored message replaces the bubble. */
+  previewUrl: string | null;
+  status: 'queued' | 'uploading' | 'done' | 'failed';
+  /** 0..1 while uploading. */
+  progress: number;
+  attachment?: Attachment;
+  error?: string;
+};
 
 /** A message I am sending: shown at once, then replaced by the stored row (matched by clientMsgId). */
 export type Pending = {
   clientMsgId: string;
   conversationId: string;
+  /** The text, or the caption when files are attached ('' for none). */
   body: string;
+  files?: PendingFile[];
   status: 'pending' | 'failed';
   createdAt: string;
   /** Why it failed, when the server said (a retry would not help, e.g. too long). */
@@ -41,11 +59,17 @@ export class Outbox {
     return item;
   }
 
-  /** Back to pending for a retry with the same clientMsgId (idempotent on the server). */
+  /**
+   * Back to pending for a retry with the same clientMsgId (idempotent on the server). Files that
+   * already uploaded keep their attachment; failed ones are queued again.
+   */
   retry(clientMsgId: string): Pending | undefined {
     const p = this.items.get(clientMsgId);
     if (!p) return undefined;
-    const next: Pending = { clientMsgId: p.clientMsgId, conversationId: p.conversationId, body: p.body, createdAt: p.createdAt, status: 'pending' };
+    const next: Pending = {
+      clientMsgId: p.clientMsgId, conversationId: p.conversationId, body: p.body, createdAt: p.createdAt, status: 'pending',
+      ...(p.files && { files: p.files.map((f) => (f.status === 'done' ? f : { ...f, status: 'queued' as const, progress: 0, error: undefined })) }),
+    };
     this.items.set(clientMsgId, next);
     this.changed(p.conversationId);
     return next;
@@ -58,11 +82,24 @@ export class Outbox {
     this.changed(p.conversationId);
   }
 
-  /** The server stored it (ack received): the stored row takes over. */
+  /** Upload progress and results of one file. */
+  updateFile(clientMsgId: string, localId: string, patch: Partial<Omit<PendingFile, 'localId' | 'file'>>): void {
+    const p = this.items.get(clientMsgId);
+    if (!p?.files) return;
+    this.items.set(clientMsgId, { ...p, files: p.files.map((f) => (f.localId === localId ? { ...f, ...patch } : f)) });
+    this.changed(p.conversationId);
+  }
+
+  get(clientMsgId: string): Pending | undefined {
+    return this.items.get(clientMsgId);
+  }
+
+  /** The server stored it (ack received), or the sender cancelled: the bubble goes, with its previews. */
   remove(clientMsgId: string): void {
     const p = this.items.get(clientMsgId);
     if (!p) return;
     this.items.delete(clientMsgId);
+    for (const f of p.files ?? []) if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
     this.changed(p.conversationId);
   }
 

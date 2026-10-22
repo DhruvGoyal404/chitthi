@@ -23,6 +23,18 @@
  *     in a busy group would exceed it.
  */
 
+/** An attachment as messages carry it (display metadata; the bytes are at /api/attachments/:id). */
+export type Attachment = {
+  id: string;
+  kind: 'image' | 'file';
+  mime: string;
+  size: number;
+  name: string;
+  width: number | null;
+  height: number | null;
+  placeholder: string | null;
+};
+
 export type Message = {
   id: string;
   conversationId: string;
@@ -36,6 +48,8 @@ export type Message = {
   createdAt: string;
   editedAt: string | null;
   deletedAt: string | null;
+  /** Always sent by the API since Phase 6 (optional so older fixtures still type-check). */
+  attachments?: Attachment[];
 };
 
 export type MessageEvent = { conversationId: string; seq: number; changeSeq: number; message: Message };

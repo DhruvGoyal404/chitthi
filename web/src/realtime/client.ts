@@ -1,7 +1,8 @@
 import type { QueryClient } from '@tanstack/react-query';
 import { io, type Socket } from 'socket.io-client';
-import { Outbox } from '../chat/outbox.js';
+import { Outbox, type PendingFile } from '../chat/outbox.js';
 import { api, ApiError } from '../lib/api.js';
+import { looksLikeImage, uploadFile } from '../lib/media.js';
 import type { ConversationDetail, InboxEntry, Message, PresenceEvent, ReceiptEvent, TypingEvent } from '../lib/types.js';
 import { uuidv7 } from '../lib/uuid.js';
 import { SyncEngine, type ChangePage, type ConversationHead, type Page, type SyncApi } from '../sync/sync.js';
@@ -119,29 +120,80 @@ export class RealtimeClient {
     return this.engine.ingestAck(message);
   }
 
-  /** Optimistic send: shown at once as pending; the stored row replaces it when acknowledged. */
-  send(conversationId: string, body: string): Promise<void> {
-    const p = this.outbox.add({ clientMsgId: uuidv7(), conversationId, body, createdAt: new Date().toISOString() });
-    return this.deliver(p.clientMsgId, conversationId, body);
+  /**
+   * Optimistic send: shown at once as pending; the stored row replaces it when acknowledged.
+   * Files upload first (one at a time, each with its own progress), then the message is sent
+   * referencing them, under the same client message id throughout.
+   */
+  send(conversationId: string, body: string, files: readonly File[] = []): Promise<void> {
+    const pendingFiles: PendingFile[] = files.map((file) => ({
+      localId: uuidv7(), file, name: file.name, size: file.size,
+      kind: looksLikeImage(file) ? 'image' : 'file',
+      previewUrl: looksLikeImage(file) ? URL.createObjectURL(file) : null,
+      status: 'queued', progress: 0,
+    }));
+    const p = this.outbox.add({
+      clientMsgId: uuidv7(), conversationId, body, createdAt: new Date().toISOString(),
+      ...(pendingFiles.length > 0 && { files: pendingFiles }),
+    });
+    return this.deliver(p.clientMsgId);
   }
 
   /** Retries a failed send with the SAME client message id: the server stores it at most once. */
   retry(clientMsgId: string): Promise<void> {
-    const p = this.outbox.retry(clientMsgId);
-    return p ? this.deliver(p.clientMsgId, p.conversationId, p.body) : Promise.resolve();
+    return this.outbox.retry(clientMsgId) ? this.deliver(clientMsgId) : Promise.resolve();
   }
 
-  private async deliver(clientMsgId: string, conversationId: string, body: string): Promise<void> {
+  /** Stops a send that is still uploading (or drops a failed one): its bubble goes away. */
+  cancel(clientMsgId: string): void {
+    this.uploads.get(clientMsgId)?.abort();
+    this.outbox.remove(clientMsgId);
+  }
+
+  private readonly uploads = new Map<string, AbortController>();
+
+  private async deliver(clientMsgId: string): Promise<void> {
+    const p = this.outbox.get(clientMsgId);
+    if (!p) return;
+    const ctrl = new AbortController();
+    this.uploads.set(clientMsgId, ctrl);
     try {
-      const { message } = await api<{ message: Message }>(`/conversations/${conversationId}/messages`, { method: 'POST', body: { clientMsgId, body } });
+      const attachmentIds: string[] = [];
+      for (const f of p.files ?? []) {
+        if (f.attachment) {
+          attachmentIds.push(f.attachment.id);
+          continue;
+        }
+        this.outbox.updateFile(clientMsgId, f.localId, { status: 'uploading', progress: 0 });
+        try {
+          const attachment = await uploadFile(f.file, {
+            signal: ctrl.signal,
+            onProgress: (progress) => { this.outbox.updateFile(clientMsgId, f.localId, { progress }); },
+          });
+          this.outbox.updateFile(clientMsgId, f.localId, { status: 'done', progress: 1, attachment });
+          attachmentIds.push(attachment.id);
+        } catch (e) {
+          if (ctrl.signal.aborted) return; // cancelled: the bubble is already gone
+          this.outbox.updateFile(clientMsgId, f.localId, { status: 'failed', error: e instanceof ApiError ? e.message : "Couldn't upload." });
+          throw e instanceof ApiError ? new ApiError(e.status, e.code, `${f.name}: ${e.message}`) : e;
+        }
+      }
+      const body = p.body.trim() === '' && attachmentIds.length > 0 ? null : p.body;
+      const { message } = await api<{ message: Message }>(`/conversations/${p.conversationId}/messages`, {
+        method: 'POST',
+        body: { clientMsgId, body, ...(attachmentIds.length > 0 && { attachmentIds }) },
+      });
       await this.ack(message); // row first, then drop the pending bubble: no flicker
       this.outbox.remove(clientMsgId);
     } catch (e) {
+      if (ctrl.signal.aborted) return;
       // 4xx (other than timeouts and rate limits) won't succeed on retry: show the server's reason.
-      // A rate limit is "failed, retry" with the server's calm explanation.
+      // A rate limit, a full disk (507) or a network failure is "failed, retry" with the reason.
       const permanent = e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
-      const limited = e instanceof ApiError && e.status === 429;
-      this.outbox.fail(clientMsgId, permanent ? e.message : undefined, limited ? e.message : undefined);
+      const retryable = e instanceof ApiError && (e.status === 429 || e.status === 507 || e.status === 503);
+      this.outbox.fail(clientMsgId, permanent ? e.message : undefined, retryable ? e.message : undefined);
+    } finally {
+      if (this.uploads.get(clientMsgId) === ctrl) this.uploads.delete(clientMsgId);
     }
   }
 

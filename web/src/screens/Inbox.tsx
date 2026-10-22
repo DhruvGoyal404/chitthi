@@ -11,7 +11,12 @@ function preview(c: InboxEntry, meId: string | undefined): string {
   if (!m) return c.kind === 'group' ? 'Group created' : 'Say namaste';
   if (m.kind === 'system') return systemText(m.meta, (id) => (id === meId ? 'You' : 'Someone'));
   if (m.deletedAt) return 'Message deleted';
-  const body = (m.body ?? '').replace(/\s+/g, ' ');
+  const kinds = m.attachmentKinds ?? [];
+  const media = kinds.length === 0 ? '' : kinds.every((k) => k === 'image')
+    ? (kinds.length === 1 ? 'Photo' : `${String(kinds.length)} photos`)
+    : (kinds.length === 1 ? 'File' : `${String(kinds.length)} attachments`);
+  const text = (m.body ?? '').replace(/\s+/g, ' ');
+  const body = media && text ? `${media}: ${text}` : media || text;
   return m.senderId === meId ? `You: ${body}` : body;
 }
 

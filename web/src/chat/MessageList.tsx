@@ -29,6 +29,7 @@ type Props = {
   onEdit: (m: Message) => void;
   onDelete: (m: Message) => void;
   onRetry: (p: Pending) => void;
+  onCancel: (p: Pending) => void;
 };
 
 const BASE = 1_000_000;
@@ -121,7 +122,7 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
     if (row.type === 'pending') {
       return (
         <MessageBubble item={row.item} mine senderName={null} tick={tickFor({ pending: row.item.status }, meId, members)} infoHref={null}
-          onRetry={() => { p.onRetry(row.item); }} />
+          onRetry={() => { p.onRetry(row.item); }} onCancel={() => { p.onCancel(row.item); }} />
       );
     }
     const m = row.item;

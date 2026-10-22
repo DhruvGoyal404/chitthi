@@ -1,5 +1,5 @@
 // Shapes of the API's JSON (dates arrive as ISO strings). Mirrors api/src/repo/*.ts.
-export type { Message, MessageEvent } from '../sync/sync.js';
+export type { Attachment, Message, MessageEvent } from '../sync/sync.js';
 
 export type Role = 'owner' | 'admin' | 'member';
 export type User = { id: string; handle: string; displayName: string };
@@ -30,6 +30,7 @@ export type InboxEntry = {
     meta: Record<string, unknown> | null;
     deletedAt: string | null;
     createdAt: string;
+    attachmentKinds?: ('image' | 'file')[];
   } | null;
 };
 

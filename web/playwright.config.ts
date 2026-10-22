@@ -1,4 +1,10 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
+
+// Uploads in e2e runs go to a temporary folder: never the repo's .data, and never a nearly full
+// drive (the API's disk guard would refuse them).
+const MEDIA_DIR = join(tmpdir(), 'chitthi-e2e-media');
 
 const CI = Boolean(process.env.CI);
 
@@ -29,7 +35,7 @@ export default defineConfig({
       url: 'http://127.0.0.1:8082/api/health',
       reuseExistingServer: !CI,
       timeout: 60_000,
-      env: { DEV_LOGIN: 'true', RATE_LIMIT_AUTH: '5000', LOG_LEVEL: 'warn' },
+      env: { DEV_LOGIN: 'true', RATE_LIMIT_AUTH: '5000', LOG_LEVEL: 'warn', MEDIA_DIR },
     },
     {
       command: 'npm run build && npx vite preview',

@@ -89,6 +89,29 @@ Rows in `attachments` are never deleted. `deleted_at` says the content is gone, 
 
 **The sweeper** runs inside the API process every 10 minutes and never overlaps itself. One pass marks orphans, removes pending files in batches of 500, then reconciles the store. Test servers run with it switched off, and tests drive it directly.
 
+## In the web app
+
+**Attaching.**
+- Ways in: the paperclip button, dragging files onto the chat, or pasting an image into the message box.
+- Chosen files wait in a tray above the composer, with a preview and a remove button each. With files in the tray, the text becomes an optional caption.
+- Before uploading, the app checks the count (up to 10) and the sizes, so obvious mistakes get a calm message at once. The server still decides on the bytes.
+
+**Sending.**
+- The letter appears at once (optimistic, as for text). Its files upload one by one, each with its own progress bar, and then the letter is sent with their ids under the same client message id.
+- **Cancel** stops the uploads and removes the letter.
+- If a temporary problem stops an upload (network, rate limit, `503`, `507`), the letter shows the reason and a **Retry** button. Retry re-uploads only the files that failed.
+- A file the server refuses for good (wrong type, too large) shows why, with **Discard** instead of Retry.
+- Uploads use `XMLHttpRequest`, the only browser API that reports upload progress.
+
+**Showing.**
+- Photos are drawn in a box sized from the stored width and height before anything loads, so the virtualized list never jumps. The blurred inline placeholder fills the box, the thumbnail fades in, and tapping opens the full image in a native modal `<dialog>` with a download link.
+- Files show as a chip with name, size and a download link.
+- The inbox previews media as "Photo", "3 photos" or "2 attachments: caption".
+
+**URLs and CSP.**
+- The only URLs built from attachment data are `/api/attachments/<id>` and `/api/attachments/<id>/thumb`, and only when the id looks like a UUID.
+- The page's CSP allows `blob:` images (local previews before sending) and `data:` images (placeholders). Everything else comes from the same origin, and the media e2e test fails on any CSP violation.
+
 ## Development note
 
 The disk guard looks at the drive holding `MEDIA_DIR`. On a nearly full development drive it refuses uploads, as it should. Point `MEDIA_DIR` at a roomier drive if that happens; the e2e run uses a temporary folder.

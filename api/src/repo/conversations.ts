@@ -212,7 +212,11 @@ export type InboxEntry = {
   /** Live text messages from others after the read marker, within the visible window; capped at 1000. */
   unread: number;
   /** The newest message the user can see here (a tombstone has body null). */
-  lastMessage: { seq: number; senderId: string | null; kind: 'text' | 'system'; body: string | null; meta: Record<string, unknown> | null; deletedAt: Date | null; createdAt: Date } | null;
+  lastMessage: {
+    seq: number; senderId: string | null; kind: 'text' | 'system'; body: string | null; meta: Record<string, unknown> | null; deletedAt: Date | null; createdAt: Date;
+    /** For an inbox preview of media ("Photo", "3 attachments"). */
+    attachmentKinds: ('image' | 'file')[];
+  } | null;
 };
 
 export const UNREAD_CAP = 1000;
@@ -237,7 +241,9 @@ export async function listConversations(pool: pg.Pool, userId: string, limit = 5
             ${unreadSql('$1')} AS unread,
             peer.id AS peer_id, peer.handle AS peer_handle, peer.display_name AS peer_name, peer.deleted_at IS NOT NULL AS peer_deleted,
             (SELECT json_build_object('seq', x.seq, 'senderId', x.sender_id, 'kind', x.kind, 'body', x.body,
-                                      'meta', x.meta, 'deletedAt', x.deleted_at, 'createdAt', x.created_at)
+                                      'meta', x.meta, 'deletedAt', x.deleted_at, 'createdAt', x.created_at,
+                                      'attachmentKinds', COALESCE((SELECT json_agg(a.kind ORDER BY a.position) FROM attachments a
+                                                                    WHERE a.message_id = x.id AND a.deleted_at IS NULL AND x.deleted_at IS NULL), '[]'::json))
                FROM messages x
               WHERE x.conversation_id = c.id AND x.seq >= p.joined_seq AND x.seq <= COALESCE(p.left_seq, c.last_seq)
               ORDER BY x.seq DESC LIMIT 1) AS "lastMessage"
