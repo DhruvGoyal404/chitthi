@@ -4,6 +4,7 @@ import type pg from 'pg';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { createRateLimits, type Limits } from '../src/limits.js';
+import type { Storage } from '../src/media/storage.js';
 import { SESSION_COOKIE } from '../src/sessions.js';
 import { uniqueHandle } from './dbhelpers.js';
 import { captureLogger, testConfig, WEB_ORIGIN } from './helpers.js';
@@ -11,14 +12,17 @@ import { captureLogger, testConfig, WEB_ORIGIN } from './helpers.js';
 export type Signed = { id: string; handle: string; cookie: string };
 
 const lots = { points: 100_000, duration: 60 };
-export const GENEROUS: Limits = { auth: lots, sendBurst: lots, send: lots, socket: lots, search: lots, newDm: lots, groupCreate: lots, memberAdd: lots };
+export const GENEROUS: Limits = {
+  auth: lots, sendBurst: lots, send: lots, socket: lots, search: lots, newDm: lots, groupCreate: lots, memberAdd: lots,
+  uploadCount: lots, uploadBytes: { points: 10 * 1024 * 1024 * 1024, duration: 60 },
+};
 
 /** The real app, logged in to Postgres as chitthi_api, with dev sign-in on and its own rate-limit namespace. */
-export function testApp(pool: pg.Pool, apiUrl: string, limits: Limits = GENEROUS): Express {
+export function testApp(pool: pg.Pool, apiUrl: string, limits: Limits = GENEROUS, extra: { storage?: Storage } = {}): Express {
   const config = testConfig({ DATABASE_URL: apiUrl, DEV_LOGIN: 'true' });
   const { logger } = captureLogger(config);
   const rateLimits = createRateLimits(pool, logger, limits, `t${randomBytes(4).toString('hex')}:`);
-  return createApp({ config, logger, pool, rateLimits });
+  return createApp({ config, logger, pool, rateLimits, ...extra });
 }
 
 export type Target = Express | string;

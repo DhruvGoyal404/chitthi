@@ -24,6 +24,10 @@ export type Limits = {
   groupCreate: Limit;
   /** Members added per user per day, including a new group's initial members. */
   memberAdd: Limit;
+  /** Uploads per user per day (checked before any bytes are read). */
+  uploadCount: Limit;
+  /** Bytes stored per user per day (charged with the real size once stored). */
+  uploadBytes: Limit;
 };
 
 const DAY = 24 * 60 * 60;
@@ -41,6 +45,8 @@ export const DEFAULT_LIMITS: Limits = {
   newDm: { points: 50, duration: DAY },
   groupCreate: { points: 20, duration: DAY },
   memberAdd: { points: 300, duration: DAY },
+  uploadCount: { points: 100, duration: DAY },
+  uploadBytes: { points: 200 * 1024 * 1024, duration: DAY },
 };
 
 /** What a person reads when a limit stops them (the API adds Retry-After). */
@@ -53,6 +59,8 @@ const MESSAGES: Record<keyof Limits, string> = {
   newDm: "You've started a lot of new chats today. Try again tomorrow.",
   groupCreate: "You've created a lot of groups today. Try again tomorrow.",
   memberAdd: "You've added a lot of people today. Try again tomorrow.",
+  uploadCount: "You've sent a lot of files today. Try again tomorrow.",
+  uploadBytes: "You've sent a lot of data today. Try again tomorrow.",
 };
 
 /** DEFAULT_LIMITS with configured overrides (only the sign-in limit is configurable, for e2e runs). */

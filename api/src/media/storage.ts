@@ -101,7 +101,9 @@ export class LocalStorage implements Storage {
     } catch (err) {
       source.destroy(); // stop reading whatever is left of the upload
       await rm(tmpPath, { force: true }).catch(() => undefined);
-      if (err instanceof TooLargeError) throw err;
+      // Filesystem failures (they carry an errno code) are the store's; anything else came from
+      // the source (too large, a refused text file, a client that went away) and is passed on.
+      if (err instanceof TooLargeError || typeof (err as NodeJS.ErrnoException).code !== 'string') throw err;
       throw new StorageError('could not store the object', err);
     }
     const { size, sha256 } = m.result();

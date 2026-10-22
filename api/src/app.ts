@@ -9,14 +9,18 @@ import { devLoginRouter } from './devLogin.js';
 import { errorHandler, notFound } from './errors.js';
 import { healthRouter } from './health.js';
 import { createRateLimits, limitBy, limitsFor, type RateLimits } from './limits.js';
+import { LocalStorage, type Storage } from './media/storage.js';
+import { uploadsRouter } from './media/uploads.js';
 import { oauthRouter } from './oauth/router.js';
 import { requireAllowedOrigin } from './origin.js';
 import { apiRoutes } from './routes.js';
 import { SessionStore } from './sessions.js';
 
-export type AppDeps = { config: Config; logger: Logger; pool: pg.Pool; rateLimits?: RateLimits };
+export type AppDeps = { config: Config; logger: Logger; pool: pg.Pool; rateLimits?: RateLimits; storage?: Storage };
 
-export function createApp({ config, logger, pool, rateLimits = createRateLimits(pool, logger, limitsFor(config)) }: AppDeps): Express {
+export function createApp({
+  config, logger, pool, rateLimits = createRateLimits(pool, logger, limitsFor(config)), storage = new LocalStorage(config.mediaDir),
+}: AppDeps): Express {
   const sessions = new SessionStore(pool);
   const app = express();
   app.disable('x-powered-by');
@@ -38,6 +42,7 @@ export function createApp({ config, logger, pool, rateLimits = createRateLimits(
   ));
   api.use(oauthRouter(pool, sessions, config, logger));
   api.use(meRouter(pool, sessions));
+  api.use(uploadsRouter(pool, sessions, storage, rateLimits, logger));
   api.use(apiRoutes(pool, sessions, rateLimits));
   if (config.devLogin) {
     logger.warn('dev login enabled: anyone can sign in as any handle');

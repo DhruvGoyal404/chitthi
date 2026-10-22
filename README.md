@@ -41,6 +41,7 @@ To sign in with Google or GitHub, set the client id and secret pairs (in `.env` 
 
 - [docs/AUDIT.md](docs/AUDIT.md): audit of the legacy codebase and the plan for this rewrite.
 - [docs/SCHEMA.md](docs/SCHEMA.md): the data model and what the database enforces.
+- [docs/MEDIA.md](docs/MEDIA.md): photos and files: storage, uploads, type checks, quotas.
 - [docs/AUTH.md](docs/AUTH.md): Google and GitHub sign-in, onboarding, linking and sessions.
 - [docs/REALTIME.md](docs/REALTIME.md): real-time delivery, the guarantees, failure modes and the client sync contract.
 - [CLAUDE.md](CLAUDE.md): invariants, phases and working rules.

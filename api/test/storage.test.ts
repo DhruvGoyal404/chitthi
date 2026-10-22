@@ -75,8 +75,8 @@ describe('local storage driver', () => {
     expect(await files()).toEqual([]);
   });
 
-  it('a source that fails mid-stream keeps nothing', async () => {
-    await expect(store.put(chunked(10, 1024, 3))).rejects.toBeInstanceOf(StorageError);
+  it("a source that fails mid-stream keeps nothing, and its own error is passed on (it isn't the store's)", async () => {
+    await expect(store.put(chunked(10, 1024, 3))).rejects.toThrow('client went away');
     expect(await files()).toEqual([]);
   });
 
