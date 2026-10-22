@@ -29,25 +29,27 @@ describe.skipIf(!url)('data model integrity (as chitthi_app)', () => {
     return { lastSeq: c?.last_seq, changeSeq: c?.change_seq, seqs: rows.map((r) => r.seq), changes: rows.map((r) => r.change) };
   }
 
-  it('assigns gap-free, unique seqs to 20 concurrent senders (100 messages)', async () => {
-    const users = await makeUsers(pool, 20, 'snd');
+  // The 20 × 5 version lives in test/perf (npm run test:perf): under a loaded machine it can hit
+  // the 5 s statement timeout. This one races fewer sends, so it stays deterministic.
+  it('assigns gap-free, unique seqs to 5 concurrent senders (20 messages)', async () => {
+    const users = await makeUsers(pool, 5, 'snd');
     const [owner, ...rest] = users;
     if (!owner) throw new Error('fixture');
     const g = await createGroup(pool, { creatorId: owner.id, title: 'Stampede', memberIds: rest.map((u) => u.id) }); // seq 1
 
-    const results = await Promise.all(users.flatMap((u) => range(1, 5).map((i) => send(pool, g.id, u.id, `${u.handle} #${String(i)}`))));
+    const results = await Promise.all(users.flatMap((u) => range(1, 4).map((i) => send(pool, g.id, u.id, `${u.handle} #${String(i)}`))));
 
-    expect(results.map((m) => m.seq).sort((a, b) => a - b)).toEqual(range(2, 101));
+    expect(results.map((m) => m.seq).sort((a, b) => a - b)).toEqual(range(2, 21));
     const c = await counters(g.id);
-    expect(c.seqs).toEqual(range(1, 101));
-    expect(c.lastSeq).toBe(101);
+    expect(c.seqs).toEqual(range(1, 21));
+    expect(c.lastSeq).toBe(21);
     // No edits yet: every message's change value equals its seq, and the cursor equals last_seq.
-    expect(c.changes).toEqual(range(1, 101));
-    expect(c.changeSeq).toBe(101);
+    expect(c.changes).toEqual(range(1, 21));
+    expect(c.changeSeq).toBe(21);
     // Each sender's own messages are in their send order, and their read marker covers their last one.
     for (const u of users) {
       const mine = results.filter((m) => m.senderId === u.id);
-      expect(mine.map((m) => m.body)).toEqual(range(1, 5).map((i) => `${u.handle} #${String(i)}`));
+      expect(mine.map((m) => m.body)).toEqual(range(1, 4).map((i) => `${u.handle} #${String(i)}`));
       const inbox = await listConversations(pool, u.id);
       expect(inbox[0]?.lastReadSeq).toBeGreaterThanOrEqual(Math.max(...mine.map((m) => m.seq)));
     }

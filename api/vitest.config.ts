@@ -16,6 +16,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
+    // Timing-sensitive tests run separately: npm run test:perf (vitest.perf.config.ts).
+    exclude: ['test/perf/**', '**/node_modules/**'],
     globalSetup: ['test/globalSetup.ts'],
     // DB tests open many connections (the concurrency tests use 25); one file at a time keeps
     // the 256 MB, max_connections=40 Postgres comfortable.

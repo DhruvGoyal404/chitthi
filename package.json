@@ -17,6 +17,7 @@
     "typecheck": "npm run typecheck -w api && npm run typecheck -w web",
     "lint": "eslint .",
     "test": "npm test -w api && npm test -w web",
+    "test:perf": "npm run test:perf -w api",
     "db:migrate": "dbmate --env MIGRATION_DATABASE_URL --no-dump-schema --wait up",
     "db:api-password": "node --env-file-if-exists=.env scripts/set-api-db-password.mjs",
     "db:rollback": "dbmate --env MIGRATION_DATABASE_URL --no-dump-schema rollback",

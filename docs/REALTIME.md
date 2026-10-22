@@ -139,6 +139,8 @@ The web implementation is `web/src/sync/sync.ts` (rules, unit-tested with a fake
 
 ## 10. Measured latency
 
+**Where it runs.** [`api/test/perf/latency.perf.test.ts`](../api/test/perf/latency.perf.test.ts), with `npm run test:perf`. It runs in CI's separate `perf` job and not in the main gate, because its numbers depend on how busy the machine is.
+
 **The test.** 200 sockets (100 members × 2 tabs) in one group, 25 messages, 5000 deliveries. Clients, API and listener all run in one Node process. Postgres 18 runs in Docker: locally that is Docker Desktop (WSL2, 256 MB cap); in CI, a service container.
 
 **What the test prints.** Each send is timed stage by stage, and the test prints a `STAGES` line next to `LATENCY`:
