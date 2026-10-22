@@ -12,6 +12,7 @@ import type { MessageEvent } from '../src/realtime/fanout.js';
 import { as, GENEROUS, signIn, testApp, type Signed } from './apphelpers.js';
 import { appPool } from './dbhelpers.js';
 import { WEB_ORIGIN } from './helpers.js';
+import { roomy } from './mediahelpers.js';
 import { connect, next } from './sockets.js';
 
 const apiUrl = inject('apiDbUrl');
@@ -26,7 +27,7 @@ describe.skipIf(!apiUrl)('messages with attachments, and downloads', () => {
   let photo: Buffer;
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), 'chitthi-att-'));
-    app = testApp(pool, apiUrl, GENEROUS, { storage: new LocalStorage(root) });
+    app = testApp(pool, apiUrl, GENEROUS, { storage: roomy(new LocalStorage(root)) });
     photo = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 10, g: 120, b: 90 } } }).jpeg().toBuffer();
   });
   afterAll(async () => {
@@ -188,7 +189,7 @@ describe.skipIf(!apiUrl)('attachments over the socket', () => {
   it('message:new carries the attachment metadata', async () => {
     const { startTestServer } = await import('./sockets.js');
     const root = await mkdtemp(join(tmpdir(), 'chitthi-att-'));
-    const server = await startTestServer(pool, apiUrl, { storage: new LocalStorage(root) });
+    const server = await startTestServer(pool, apiUrl, { storage: roomy(new LocalStorage(root)) });
     try {
       const [a, c] = [await signIn(server.url, 'sk'), await signIn(server.url, 'sk')];
       const conv = (await as(server.url, a).post('/conversations/direct', { userId: c.id })).body.conversation.id as string;

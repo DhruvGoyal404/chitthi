@@ -12,7 +12,7 @@ import { LocalStorage, StorageError, type Storage } from '../src/media/storage.j
 import { as, GENEROUS, signIn, testApp, type Signed } from './apphelpers.js';
 import { adminPool, appPool } from './dbhelpers.js';
 import { captureLogger, testConfig, WEB_ORIGIN } from './helpers.js';
-import { over } from './mediahelpers.js';
+import { over, roomy } from './mediahelpers.js';
 
 const apiUrl = inject('apiDbUrl');
 const ownerUrl = inject('dbUrl');
@@ -29,7 +29,7 @@ describe.skipIf(!apiUrl)('media lifecycle', () => {
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'chitthi-life-'));
     storage = new LocalStorage(root);
-    app = testApp(pool, apiUrl, GENEROUS, { storage });
+    app = testApp(pool, apiUrl, GENEROUS, { storage: roomy(storage) });
     photo = await sharp({ create: { width: 300, height: 200, channels: 3, background: { r: 200, g: 60, b: 60 } } }).png().toBuffer();
   });
   afterAll(async () => {
@@ -133,7 +133,7 @@ describe.skipIf(!apiUrl)('media lifecycle', () => {
         return storage.delete(k);
       },
     });
-    const flakyApp = testApp(pool, apiUrl, GENEROUS, { storage: flaky });
+    const flakyApp = testApp(pool, apiUrl, GENEROUS, { storage: roomy(flaky) });
     expect((await as(flakyApp, a).delete(`/conversations/${conv}/messages/${msg.id}`)).status).toBe(200); // never fails the delete
     const k = await keysOf(doc.id);
     expect(k).toMatchObject({ deleted: true, removed: false });

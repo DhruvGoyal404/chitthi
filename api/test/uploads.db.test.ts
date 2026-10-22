@@ -14,7 +14,7 @@ import { diskGuard } from '../src/media/uploads.js';
 import { LocalStorage, StorageError, type Storage } from '../src/media/storage.js';
 import { as, GENEROUS, signIn, testApp, type Signed } from './apphelpers.js';
 import { appPool } from './dbhelpers.js';
-import { over } from './mediahelpers.js';
+import { over, roomy } from './mediahelpers.js';
 import { captureLogger, testConfig, WEB_ORIGIN } from './helpers.js';
 
 const apiUrl = inject('apiDbUrl');
@@ -47,7 +47,7 @@ describe.skipIf(!apiUrl)('POST /api/uploads', () => {
   afterAll(async () => {
     await pool.end();
   });
-  const appWith = (limits: Partial<Limits> = {}, store: Storage = storage) => testApp(pool, apiUrl, { ...GENEROUS, ...limits }, { storage: store });
+  const appWith = (limits: Partial<Limits> = {}, store: Storage = roomy(storage)) => testApp(pool, apiUrl, { ...GENEROUS, ...limits }, { storage: store });
   /** A signed-in, same-origin multipart POST (the shared `as` helper always sends JSON). */
   const post = (app: Express, u: Signed) => request(app).post('/api/uploads').set('Cookie', u.cookie).set('Origin', WEB_ORIGIN);
   const upload = (app: Express, u: Signed, data: Buffer, filename: string, contentType = 'application/octet-stream') =>

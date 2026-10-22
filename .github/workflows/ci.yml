@@ -98,6 +98,9 @@ jobs:
       WEB_ORIGINS: http://localhost:5175
       DEV_LOGIN: "true"
       RATE_LIMIT_AUTH: "5000"
+      # Uploads go to RAM-backed /dev/shm: the API refuses uploads when the disk holding them has
+      # less than max(15 %, 2 GB) free, and some runners' disks do.
+      E2E_MEDIA_DIR: /dev/shm/chitthi-e2e-media
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

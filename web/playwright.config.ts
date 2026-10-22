@@ -4,7 +4,9 @@ import { defineConfig, devices } from '@playwright/test';
 
 // Uploads in e2e runs go to a temporary folder: never the repo's .data, and never a nearly full
 // drive (the API's disk guard would refuse them).
-const MEDIA_DIR = join(tmpdir(), 'chitthi-e2e-media');
+// CI sets E2E_MEDIA_DIR to a RAM-backed folder (/dev/shm), so a runner's nearly full disk can't
+// trip the guard either; the guard's own behaviour is covered by the API tests.
+const MEDIA_DIR = process.env.E2E_MEDIA_DIR ?? join(tmpdir(), 'chitthi-e2e-media');
 
 const CI = Boolean(process.env.CI);
 
