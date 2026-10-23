@@ -84,7 +84,7 @@ printf 'ACME_EMAIL=smoke@example.com\nEDGE_CA_OPTION=local_certs\nEDGE_DATA=%s\n
 echo "127.0.0.1 $host" | sudo tee -a /etc/hosts >/dev/null
 (cd "$work/edge" && docker compose -p edge config --quiet && docker compose -p edge up -d --wait)
 for _ in $(seq 1 40); do sudo test -s "$work/edge-data/caddy/caddy/pki/authorities/local/root.crt" && break; sleep 0.5; done
-sudo cat "$work/edge-data/caddy/caddy/pki/authorities/local/root.crt" > "$work/root.crt"
+sudo install -m 0644 "$work/edge-data/caddy/caddy/pki/authorities/local/root.crt" "$work/root.crt"
 for _ in $(seq 1 40); do curl -fsS --cacert "$work/root.crt" -o /dev/null "https://$host/api/health" 2>/dev/null && break; sleep 0.5; done
 echo "ok   edge up: TLS for $host from the internal CA"
 
