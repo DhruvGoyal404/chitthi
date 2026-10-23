@@ -3,14 +3,19 @@
 # Runs as root through Azure Run Command (the deploy workflow sends this file):
 #
 #   deploy.sh deploy sha=<git sha> api=<image@digest> migrate=<image@digest> web=<image@digest> \
-#                    vault=<key vault name> acme_email=<address> [acme_ca=production|staging]
+#                    vault=<key vault name>
 #   deploy.sh rollback      back to the release before the current one (images only)
 #   deploy.sh smoke         check what is running, through the edge and the public hostname
 #
-# deploy: fetch the compose and Caddy files at <sha>; write each container's env file from Key
-# Vault (through the VM's managed identity); pull by digest; dump the database; migrate; start;
-# update the edge; smoke-test. If anything fails after the switch, the previous release comes
-# back automatically and the script exits non-zero either way.
+# deploy: fetch Chitthi's compose file and its site file at <sha>; check the site file against the
+# whole edge configuration; write each container's env file from Key Vault (through the VM's
+# managed identity); pull by digest; dump the database; migrate; start; install the site file and
+# reload the edge; smoke-test. If anything fails after the switch, the previous release comes back
+# automatically and the script exits non-zero either way.
+#
+# The edge is shared. This script writes exactly one file there, /srv/edge/sites/chitthi.caddy;
+# the main Caddyfile, the edge's compose file and every other app's site file belong to others
+# (deploy/host/edge.sh, the other apps' deploys) and are never written here.
 #
 # Migrations are forward-only, so a rollback restores images, never the schema: every migration
 # must keep the previous release working (expand, then contract in a later release).
@@ -22,6 +27,8 @@ HOST=chitthi.dhruvgoyal.tech
 ORIGIN=https://$HOST
 SRV=/srv/chitthi
 EDGE=/srv/edge
+SITE=$EDGE/sites/chitthi.caddy
+EDGE_UID=10002
 DATA=/data/chitthi
 DUMPS=$DATA/pre-deploy
 KEEP_DUMPS=5
@@ -99,32 +106,26 @@ case ${1:-} in
 esac
 
 # --- Arguments.
-declare -A arg=([acme_ca]=production)
+declare -A arg=()
 for kv in "$@"; do
   [[ $kv == *=* ]] || die "argument '$kv' is not key=value"
   arg[${kv%%=*}]=${kv#*=}
 done
-for key in sha api migrate web vault acme_email; do [[ -n ${arg[$key]:-} ]] || die "missing $key=..."; done
+for key in sha api migrate web vault; do [[ -n ${arg[$key]:-} ]] || die "missing $key=..."; done
 [[ ${arg[sha]} =~ ^[0-9a-f]{40}$ ]] || die "sha must be a full commit id"
 for key in api migrate web; do
   [[ ${arg[$key]} =~ $IMAGE_RE && ${BASH_REMATCH[1]} == "$key" ]] || die "$key must be the chitthi-$key image pinned by digest"
 done
 [[ ${arg[vault]} =~ ^[A-Za-z0-9-]{3,24}$ ]] || die "vault is not a Key Vault name"
-[[ ${arg[acme_email]} =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || die "acme_email is not an email address"
-case ${arg[acme_ca]} in
-  production) ca_option= ;;
-  staging) ca_option='acme_ca https://acme-staging-v02.api.letsencrypt.org/directory' ;;
-  local) [[ -n $TEST_CONFIG_DIR ]] || die "acme_ca=local is for CI only"; ca_option=local_certs ;;
-  *) die "acme_ca must be production or staging" ;;
-esac
 
 exec 9>/run/chitthi-deploy.lock
 flock -n 9 || die "another deploy is running"
-[[ -d $SRV && -d $DATA/pg && -d $EDGE ]] || die "the host is not bootstrapped (deploy/host/bootstrap.sh)"
+[[ -d $SRV && -d $DATA/pg && -d $EDGE/sites ]] || die "the host is not bootstrapped (deploy/host/bootstrap.sh)"
+[[ -f $EDGE/Caddyfile && -f $EDGE/.env && -f $EDGE/compose.yaml ]] || die "the edge is not installed (deploy/host/edge.sh)"
 log "release ${arg[sha]}"
 
-# --- Configuration files at exactly this commit.
-files=(deploy/chitthi/compose.yaml deploy/edge/compose.yaml deploy/edge/Caddyfile deploy/edge/sites/chitthi.caddy)
+# --- Configuration files at exactly this commit: Chitthi's own, nothing of the edge's.
+files=(deploy/chitthi/compose.yaml deploy/edge/sites/chitthi.caddy)
 for f in "${files[@]}"; do
   mkdir -p "$work/$(dirname "$f")"
   if [[ -n $TEST_CONFIG_DIR ]]; then
@@ -133,6 +134,23 @@ for f in "${files[@]}"; do
     curl -fsSL --proto '=https' --max-time 30 -o "$work/$f" "https://raw.githubusercontent.com/$REPO/${arg[sha]}/$f"
   fi
 done
+
+# --- The new site file must validate together with the main Caddyfile and every other app's
+# site file as they are now, in a one-off container run like the edge (same image, uid and
+# capabilities). Checked before anything changes: a broken site file stops the deploy here.
+validate_site() {
+  local image
+  rm -rf "$work/sites" && mkdir "$work/sites"
+  find "$EDGE/sites" -maxdepth 1 -name '*.caddy' -type f -exec cp {} "$work/sites/" \;
+  cp "$work/deploy/edge/sites/chitthi.caddy" "$work/sites/chitthi.caddy"
+  image=$(edge config --images)
+  docker run --rm --network none --read-only --user "$EDGE_UID:$EDGE_UID" --cap-drop ALL --cap-add NET_BIND_SERVICE \
+    --security-opt no-new-privileges --tmpfs /config --tmpfs /data --env-file "$EDGE/.env" \
+    -v "$EDGE/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$work/sites:/etc/caddy/sites:ro" \
+    "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>"$work/validate.log"
+}
+validate_site || { tail -n 5 "$work/validate.log" >&2; die "the site file at this commit does not validate with the edge's configuration; nothing was changed"; }
+log "site file validates with the whole edge configuration"
 
 # --- Secrets: Key Vault through the managed identity. Values are never printed, never put on a
 # command line (where other users could read them in /proc), and only written to 0600 files.
@@ -224,25 +242,26 @@ app run --rm migrate || failed "the migrations failed"
 app up -d --wait --remove-orphans api web || failed "the API or web container did not become healthy"
 log "app up"
 
-# --- Edge: write the shared files in place (Caddyfile is a single-file bind mount, so its inode
-# must stay), then start Caddy, or reload it if its configuration changed. A reload with a broken
-# Caddyfile is refused and the running configuration stays.
-install -d -m 0755 "$EDGE/sites"
-printf 'ACME_EMAIL=%s\nEDGE_CA_OPTION=%s\nEDGE_DATA=/data/edge\n' "${arg[acme_email]}" "$ca_option" > "$work/edge.env"
-changed=()
-for pair in "compose.yaml:$EDGE/compose.yaml" "Caddyfile:$EDGE/Caddyfile" "sites/chitthi.caddy:$EDGE/sites/chitthi.caddy" ; do
-  src=$work/deploy/edge/${pair%%:*} dst=${pair#*:}
-  cmp -s "$src" "$dst" || { cp "$src" "$dst"; chmod 0644 "$dst"; changed+=("${pair%%:*}"); }
-done
-cmp -s "$work/edge.env" "$EDGE/.env" || { cp "$work/edge.env" "$EDGE/.env"; changed+=(.env); }
+# --- Edge: only Chitthi's own site file, under the edge lock (edge.sh and other apps' deploys
+# take it too). Validated again against whatever the others have now, then reloaded. If Caddy
+# refuses the reload, the old file goes back: the running configuration never changed, so every
+# site, this one included, keeps being served as before.
+exec 8>/run/edge-deploy.lock
+flock -w 120 8 || failed "another deploy is holding the edge"
 running=$(edge ps --status running --services 2>/dev/null || true)
-if ! grep -qx caddy <<<"$running" || [[ " ${changed[*]} " == *" compose.yaml "* || " ${changed[*]} " == *" .env "* ]]; then
-  edge up -d --wait || failed "the edge did not start"
-elif [[ ${#changed[@]} -gt 0 ]]; then
-  edge exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address unix//run/caddy/admin.sock \
-    || failed "the edge refused the new Caddyfile"
+grep -qx caddy <<<"$running" || failed "the edge is not running (deploy/host/edge.sh)"
+if ! cmp -s "$work/deploy/edge/sites/chitthi.caddy" "$SITE"; then
+  validate_site || failed "the site file no longer validates with the edge's configuration"
+  [[ -f $SITE ]] && cp "$SITE" "$work/chitthi.caddy.old"
+  cp "$work/deploy/edge/sites/chitthi.caddy" "$SITE"
+  chmod 0644 "$SITE"
+  if ! edge exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address unix//run/caddy/admin.sock; then
+    if [[ -f $work/chitthi.caddy.old ]]; then cp "$work/chitthi.caddy.old" "$SITE"; else rm -f "$SITE"; fi
+    failed "Caddy refused the new site file; the old one is back"
+  fi
+  log "edge reloaded with the new site file"
 fi
-log "edge up${changed[*]:+ (changed: ${changed[*]})}"
+flock -u 8
 
 smoke || failed "the smoke test failed"
 record "${arg[sha]}" ok

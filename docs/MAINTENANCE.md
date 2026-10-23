@@ -10,6 +10,10 @@ alerts, secret rotation, updates, disk growth, adding the second app, budget, in
 - **`deploy/edge`:** the shared Caddy (compose project `edge`, host network, ports 80 and 443).
   - `Caddyfile` holds the global options and a loopback-only liveness site on 127.0.0.1:2080.
   - `sites/<app>.caddy` holds one file per app.
+  - **Ownership:**
+    - [`deploy/host/edge.sh`](../deploy/host/edge.sh) (host infrastructure) owns the main `Caddyfile`, the edge's `compose.yaml` and its `.env`.
+    - Each app's deploy owns exactly one file, `sites/<app>.caddy`, and never writes anything else there.
+    - Every change is validated against the whole configuration before Caddy reloads, so a broken file can't take another app's site down.
 - **`deploy/chitthi`:** Chitthi's stack (compose project `chitthi`).
   - **db:** Postgres 18, on an internal network only.
   - **migrate:** a one-off job.
@@ -69,7 +73,7 @@ workflow sends it with the release's arguments; by hand:
 az vm run-command invoke -g <rg> -n <vm> --command-id RunShellScript --scripts @deploy/host/deploy.sh \
   --parameters deploy sha=<commit> api=ghcr.io/dhruvgoyal404/chitthi-api@sha256:<…> \
                migrate=ghcr.io/dhruvgoyal404/chitthi-migrate@sha256:<…> web=ghcr.io/dhruvgoyal404/chitthi-web@sha256:<…> \
-               vault=<key vault> acme_email=<address> [acme_ca=staging]
+               vault=<key vault>
 az vm run-command invoke … --scripts @deploy/host/deploy.sh --parameters rollback
 az vm run-command invoke … --scripts @deploy/host/deploy.sh --parameters smoke
 ```
@@ -98,11 +102,14 @@ az vm run-command invoke … --scripts @deploy/host/deploy.sh --parameters smoke
    nightly off-VM backups are the real history.
 7. **Migrations** (`docker compose run --rm migrate`), then the API and web come up, waiting for
    their health checks.
-8. **Edge.** The shared Caddy files are written in place.
-   - The `Caddyfile` is a single-file bind mount, so its inode has to stay the same.
-   - Caddy is started if it isn't running, recreated if its compose file or `.env` changed, and
-     otherwise reloaded.
-   - A reload with a broken `Caddyfile` is refused, and the running configuration stays.
+8. **Edge: Chitthi's site file only.** `sites/chitthi.caddy` is validated twice:
+   - **Before anything changes.** A broken file stops the deploy right there.
+   - **Again before it's installed,** under the edge lock, against whatever the other apps' files
+     are by then.
+
+   Validation runs the main `Caddyfile` plus every site file in a one-off container configured
+   exactly like the edge: same image, uid and capabilities. Then Caddy reloads. If it refuses,
+   the old file goes back, and every site keeps being served as before.
 9. **Smoke test through the public hostname** (resolved to 127.0.0.1, real TLS):
    - health, with the database;
    - the app shell with its CSP and HSTS;
@@ -119,12 +126,29 @@ non-zero either way. Every outcome is appended to `/srv/chitthi/deploys.log`.
 migration must keep the previous release working: add a column in one release, and only stop
 using or drop the old one in a later release (expand, then contract).
 
-**Tested in CI on every push** (`deploy/host/test-deploy.sh`, on the bootstrapped runner):
+**The edge itself** is installed or updated with `edge.sh`, never by an app's deploy:
+
+```
+az vm run-command invoke … --scripts @deploy/host/edge.sh --parameters sha=<commit> acme_email=<address> [acme_ca=staging]
+```
+
+A new main `Caddyfile` is validated with every site file already present. If Caddy then refuses
+it, the old file is put back. edge.sh and every app's deploy take the same lock
+(`/run/edge-deploy.lock`).
+
+**Tested in CI on every push** (`deploy/host/test-deploy.sh`, on the bootstrapped runner). A
+second app's site file (`other.caddy`, serving its own hostname) sits next to Chitthi's
+throughout. The scenarios:
 - a first deploy;
 - the same release again;
 - a release whose API exits at once, which must fail, roll itself back and leave the previous
   release passing the smoke test;
+- a release whose site file is broken, which must fail before changing anything, with Chitthi
+  still served;
 - an explicit rollback.
+
+At the end, `other.caddy`, the main `Caddyfile`, and the edge's `compose.yaml` and `.env` must be
+byte-identical to before, and the other site must still answer.
 
 ## Memory budget
 
