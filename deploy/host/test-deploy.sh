@@ -65,7 +65,9 @@ cp -r "$repo/deploy" "$broken/"
 printf '\nthis is { not a Caddyfile\n' >> "$broken/deploy/edge/sites/chitthi.caddy"
 site_before=$(sudo sha256sum /srv/edge/sites/chitthi.caddy)
 docker tag chitthi-api:ci chitthi-api:untouched
-if release untouched "$broken"; then fail "a deploy with a broken site file reported success"; fi
+if release untouched "$broken" 2>&1 | tee "$broken/deploy.log"; then fail "a deploy with a broken site file reported success"; fi
+grep -q 'does not validate with the edge' "$broken/deploy.log" || fail "a broken site file got past the check before the switch"
+if grep -q '^deploy: app up' "$broken/deploy.log"; then fail "a deploy with a broken site file switched the app"; fi
 [[ $(sudo sha256sum /srv/edge/sites/chitthi.caddy) == "$site_before" ]] || fail "a broken site file was installed"
 [[ $(current_api) == chitthi-api:ci ]] || fail "a deploy with a broken site file switched the release"
 run smoke >/dev/null || fail "Chitthi stopped passing the smoke test after a broken site file"
@@ -104,7 +106,7 @@ dumps=$(sudo find "$bt/azure/db" -name '*.dump.age' | wc -l)
 [[ $dumps -eq 2 ]] || fail "two backups should leave two dumps, found $dumps"
 [[ $(sudo find "$bt/azure/manifests" -name '*.json' | wc -l) -eq 2 ]] || fail "two backups should leave two manifests"
 [[ $(sudo find "$bt/azure/media" -name '*.age' | wc -l) -eq 1 ]] || fail "the media file was uploaded more than once"
-[[ $(sudo find "$bt/r2/db" -name '*.dump.age' | wc -l) -eq 2 && -f $bt/r2/media/$key.age ]] || fail "the R2 copy is incomplete"
+if [[ $(sudo find "$bt/r2/db" -name '*.dump.age' | wc -l) -ne 2 ]] || ! sudo test -f "$bt/r2/media/$key.age"; then fail "the R2 copy is incomplete"; fi
 sudo grep -q "$key" "$(sudo find "$bt/azure/manifests" -name '*.json' | sort | tail -n 1)" || fail "the manifest does not list the media file"
 if sudo grep -q 'backup_probe' "$(sudo find "$bt/azure/db" -name '*.dump.age' | head -n 1)"; then fail "the dump is not encrypted"; fi
 echo "ok   6a. two nightly backups: two dumps and manifests, media uploaded once, R2 in step, dumps encrypted"

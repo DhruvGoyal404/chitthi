@@ -143,14 +143,20 @@ done
 # capabilities). Checked before anything changes: a broken site file stops the deploy here.
 validate_site() {
   local image
-  rm -rf "$work/sites" && mkdir "$work/sites"
+  # Readable by the edge uid, like /srv/edge/sites: an unreadable folder would make Caddy's
+  # `import sites/*.caddy` match nothing and "validate" a configuration with no sites at all.
+  rm -rf "$work/sites" && install -d -m 0755 "$work/sites"
   find "$EDGE/sites" -maxdepth 1 -name '*.caddy' -type f -exec cp {} "$work/sites/" \;
   cp "$work/deploy/edge/sites/chitthi.caddy" "$work/sites/chitthi.caddy"
+  chmod 0644 "$work/sites"/*.caddy
   image=$(edge config --images)
   docker run --rm --network none --read-only --user "$EDGE_UID:$EDGE_UID" --cap-drop ALL --cap-add NET_BIND_SERVICE \
     --security-opt no-new-privileges --tmpfs "/config:uid=$EDGE_UID,gid=$EDGE_UID,mode=0700" --tmpfs "/data:uid=$EDGE_UID,gid=$EDGE_UID,mode=0700" --env-file "$EDGE/.env" \
     -v "$EDGE/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$work/sites:/etc/caddy/sites:ro" \
-    "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>"$work/validate.log"
+    "$image" caddy adapt --validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$work/adapted.json" 2>"$work/validate.log" \
+    || return 1
+  # Proof the candidate was really part of what validated, not silently skipped.
+  grep -qF "\"$HOST\"" "$work/adapted.json" || { echo "the adapted configuration has no $HOST site" >> "$work/validate.log"; return 1; }
 }
 validate_site || { tail -n 5 "$work/validate.log" >&2; die "the site file at this commit does not validate with the edge's configuration; nothing was changed"; }
 log "site file validates with the whole edge configuration"
