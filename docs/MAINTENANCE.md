@@ -60,6 +60,72 @@ host set up this way.
 `FAIL containers can't reach the metadata service`. Fix the cause and re-run it.
 `free -m` at the end is the real baseline for the memory budget's "OS" row.
 
+## Deploy and rollback
+
+[`deploy/host/deploy.sh`](../deploy/host/deploy.sh) runs as root through Run Command. The deploy
+workflow sends it with the release's arguments; by hand:
+
+```
+az vm run-command invoke -g <rg> -n <vm> --command-id RunShellScript --scripts @deploy/host/deploy.sh \
+  --parameters deploy sha=<commit> api=ghcr.io/dhruvgoyal404/chitthi-api@sha256:<…> \
+               migrate=ghcr.io/dhruvgoyal404/chitthi-migrate@sha256:<…> web=ghcr.io/dhruvgoyal404/chitthi-web@sha256:<…> \
+               vault=<key vault> acme_email=<address> [acme_ca=staging]
+az vm run-command invoke … --scripts @deploy/host/deploy.sh --parameters rollback
+az vm run-command invoke … --scripts @deploy/host/deploy.sh --parameters smoke
+```
+
+**A deploy, in order:**
+1. **Lock.** One deploy at a time (`flock`).
+2. **Configuration at that exact commit.** The compose and Caddy files come from
+   `raw.githubusercontent.com/DhruvGoyal404/chitthi/<sha>/…`, and the compose file is validated.
+   Images are accepted only as `ghcr.io/dhruvgoyal404/chitthi-*@sha256:…`.
+3. **Secrets from Key Vault**, read with the VM's managed identity. The deploy fetches a token from
+   the metadata service, which only root can reach.
+   - Each value is written to the env file of the one container that needs it (`0600`, root).
+   - Values never appear in output or on a command line.
+   - Database passwords must be 24+ characters of `[A-Za-z0-9_-]`, so they go into URLs unescaped.
+
+   | Key Vault secret | Goes to |
+   |---|---|
+   | `chitthi-postgres-password` | `db.env`, `migrate.env` |
+   | `chitthi-api-db-password` | `migrate.env`, `api.env` |
+   | `chitthi-google-client-id` and `chitthi-google-client-secret` | `api.env` |
+   | `chitthi-github-client-id` and `chitthi-github-client-secret` | `api.env` |
+4. **Pull by digest**, before anything stops.
+5. **Switch.** The running release's `.env` and `compose.yaml` become `*.previous`, the rollback
+   point. A re-deploy of the same release keeps the older rollback point.
+6. **Pre-deploy dump** (`pg_dump -Fc`) to `/data/chitthi/pre-deploy/`. The newest 5 are kept; the
+   nightly off-VM backups are the real history.
+7. **Migrations** (`docker compose run --rm migrate`), then the API and web come up, waiting for
+   their health checks.
+8. **Edge.** The shared Caddy files are written in place.
+   - The `Caddyfile` is a single-file bind mount, so its inode has to stay the same.
+   - Caddy is started if it isn't running, recreated if its compose file or `.env` changed, and
+     otherwise reloaded.
+   - A reload with a broken `Caddyfile` is refused, and the running configuration stays.
+9. **Smoke test through the public hostname** (resolved to 127.0.0.1, real TLS):
+   - health, with the database;
+   - the app shell with its CSP and HSTS;
+   - HTTP redirecting to HTTPS;
+   - a Socket.IO handshake for the app's own Origin, and 403 for a foreign one;
+   - 403 for a POST without Origin;
+   - no dev sign-in.
+
+**If anything fails after the switch,** the previous release comes back automatically: its images
+and compose file, but not its migrations. That release is then smoke-tested, and the script exits
+non-zero either way. Every outcome is appended to `/srv/chitthi/deploys.log`.
+
+**Migrations are forward-only.** A rollback restores images, never the schema. So every
+migration must keep the previous release working: add a column in one release, and only stop
+using or drop the old one in a later release (expand, then contract).
+
+**Tested in CI on every push** (`deploy/host/test-deploy.sh`, on the bootstrapped runner):
+- a first deploy;
+- the same release again;
+- a release whose API exits at once, which must fail, roll itself back and leave the previous
+  release passing the smoke test;
+- an explicit rollback.
+
 ## Memory budget
 
 The VM has 1 GiB, of which roughly 900 MiB is visible to Linux; confirm with `free -m` when the
