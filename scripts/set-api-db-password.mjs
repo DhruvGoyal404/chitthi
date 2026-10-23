@@ -1,6 +1,6 @@
 // Sets the chitthi_api login role's password to the one in DATABASE_URL, connecting with the
-// owner credentials in MIGRATION_DATABASE_URL. Dev and CI only; production sets the password in
-// its secret store. Run after `npm run db:migrate` (which creates the role).
+// owner credentials in MIGRATION_DATABASE_URL. Run after `npm run db:migrate` (which creates the
+// role). In production the migrate image runs it, with both URLs from the secret store.
 import pg from 'pg';
 
 const apiUrl = process.env.DATABASE_URL;

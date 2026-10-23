@@ -71,6 +71,29 @@ jobs:
           set -o pipefail
           npm audit --audit-level=high 2>&1 | tee audit.log
 
+  images:
+    # The production images (api/Dockerfile, web/Dockerfile), built on every push and checked
+    # without a database: non-root, read-only, no capabilities, config refusal, sharp's musl build,
+    # the web page's headers and routing. Publishing them comes with the deploy workflow.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the API image
+        run: docker build -f api/Dockerfile --target api -t chitthi-api:ci .
+      - name: Build the migrate image
+        run: docker build -f api/Dockerfile --target migrate -t chitthi-migrate:ci .
+      - name: Build the web image
+        run: docker build -f web/Dockerfile -t chitthi-web:ci .
+      - name: Check the images
+        run: scripts/check-images.sh chitthi-api:ci chitthi-migrate:ci chitthi-web:ci
+      - name: Image sizes
+        run: |
+          set -o pipefail
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep ':ci '
+
   perf:
     # Timing-sensitive tests (npm run test:perf): their own job, so they can't make the main
     # gate flaky. They print LATENCY / STAGES / WORST lines (docs/REALTIME.md) and assert only
