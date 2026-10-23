@@ -94,12 +94,12 @@ curl_edge() { curl -sS --cacert "$work/root.crt" "$@"; }
 code=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "http://$host/c/x")
 [[ $code == "308 https://$host/c/x" ]] || fail "plain HTTP is not redirected to HTTPS: $code"
 headers=$(curl_edge -D - -o /dev/null "https://$host/")
-grep -qF 'Strict-Transport-Security: max-age=31536000' <<<"$headers" || fail "no HSTS on the page"
-grep -qF "frame-ancestors 'none'" <<<"$headers" || fail "the page lost its CSP through the edge"
+grep -qiF 'Strict-Transport-Security: max-age=31536000' <<<"$headers" || fail "no HSTS on the page"
+grep -qiF "frame-ancestors 'none'" <<<"$headers" || fail "the page lost its CSP through the edge"
 grep -qi '^Server:' <<<"$headers" && fail "the edge announces its server"
 headers=$(curl_edge -D - -o /dev/null "https://$host/api/health")
-grep -qF "Content-Security-Policy: default-src 'none'" <<<"$headers" || fail "the API lost its CSP through the edge"
-grep -qF 'Strict-Transport-Security: max-age=31536000' <<<"$headers" || fail "no HSTS on the API"
+grep -qiF "Content-Security-Policy: default-src 'none'" <<<"$headers" || fail "the API lost its CSP through the edge"
+grep -qiF 'Strict-Transport-Security: max-age=31536000' <<<"$headers" || fail "no HSTS on the API"
 echo "ok   edge: HTTP→HTTPS, HSTS, CSPs intact, no Server header"
 
 # The Origin allow-list guards every Engine.IO request; the session is checked at Socket.IO connect
