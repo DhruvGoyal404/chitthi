@@ -85,6 +85,11 @@ const schema = z
       for (const key of ENDPOINT_OVERRIDES) {
         if (env[key] !== undefined) ctx.addIssue({ code: 'custom', path: [key], message: 'endpoint overrides are for tests only' });
       }
+      // Raising the per-IP sign-in limit is for end-to-end runs; in production it would only
+      // weaken the protection against guessing.
+      if (env.RATE_LIMIT_AUTH !== undefined) {
+        ctx.addIssue({ code: 'custom', path: ['RATE_LIMIT_AUTH'], message: 'development and test only: production keeps the default sign-in limit' });
+      }
     }
   });
 
