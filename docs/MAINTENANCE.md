@@ -26,6 +26,40 @@ alerts, secret rotation, updates, disk growth, adding the second app, budget, in
 
   CI runs it on every push (the `images` job).
 
+## Host setup
+
+[`deploy/host/bootstrap.sh`](../deploy/host/bootstrap.sh) turns a fresh Ubuntu 24.04 VM into the host.
+
+**Running it.** Use Run Command; there is no SSH:
+
+```
+az vm run-command invoke -g <rg> -n <vm> --command-id RunShellScript --scripts @deploy/host/bootstrap.sh
+```
+
+**Idempotent.** Re-run it after any change to the file. Every run ends by re-verifying the whole
+host and fails loudly if any check fails. CI runs it twice on an Ubuntu 24.04 runner, with a loop
+file standing in for the data disk, before the production smoke test, so the stack is tested on a
+host set up this way.
+
+**What it sets up:**
+
+| Area | State |
+|---|---|
+| Docker | From Ubuntu's archive (`docker.io`, `docker-compose-v2`), so its security fixes arrive with everything else. `daemon.json`: capped `local` logs, `live-restore` (containers survive a daemon upgrade), no `docker-proxy`, `no-new-privileges` by default. |
+| Users | One per container uid, no login shell. edge 10002; chitthi 10010 (API, migrations); chitthi-db 10011 (Postgres). The second app takes 10020 and 10021. |
+| Data disk | `/data`, ext4, mounted by UUID with `nofail`. Only a device with no signature at all is ever formatted. Anything that isn't ext4 is refused. |
+| Directories | `/srv/chitthi`: root only (env files). `/data/chitthi/pg`: 10011, 0700. `/data/chitthi/media`: 10010, 0700. `/data/edge/caddy`: 10002, 0700. |
+| Swap | `/swapfile`, 2 GiB, `vm.swappiness=10`. |
+| Firewall | UFW: 80 and 443 in, nothing else. SSH is disabled and not listening; the network security group agrees. |
+| Metadata guard | `metadata-guard.service` (iptables, re-applied whenever Docker starts). Only root reaches the instance metadata service (identity tokens for Key Vault and backups) and the wireserver; containers and other users get "connection refused". DNS on 168.63.129.16:53 stays open. |
+| Trimmed | snapd purged; multipathd and ssh disabled (RAM). |
+| Logs | journald capped at 200 MB / one month. Container logs capped at 3 × 10 MB each. |
+| Updates | unattended-upgrades for security updates. When one needs a reboot, it happens at 21:30 UTC (03:00 IST). |
+
+**When it fails,** the last lines name the check, for example
+`FAIL containers can't reach the metadata service`. Fix the cause and re-run it.
+`free -m` at the end is the real baseline for the memory budget's "OS" row.
+
 ## Memory budget
 
 The VM has 1 GiB, of which roughly 900 MiB is visible to Linux; confirm with `free -m` when the

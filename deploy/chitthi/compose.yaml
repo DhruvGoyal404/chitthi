@@ -8,6 +8,11 @@
 #   api.env      DATABASE_URL (chitthi_api), GOOGLE_*/GITHUB_* client ids and secrets
 # Each container gets only its own secrets: the API never sees the owner's password.
 #
+# Host uids (created by deploy/host/bootstrap.sh, which also owns the data directories to match):
+#   10010 chitthi      the API and the migrate job; owns /data/chitthi/media
+#   10011 chitthi-db   Postgres; owns /data/chitthi/pg
+# No two apps share a uid, so a process escaping one app's container can't touch another's files.
+#
 # Memory limits come from measurements of this stack under the smoke workload (docs/MAINTENANCE.md,
 # "Memory budget"). A container that overruns its limit is killed and restarted on its own; the
 # host and the other app keep running. The CHITTHI_*_MEM overrides exist for measuring, not for
@@ -28,8 +33,9 @@ services:
     <<: *hardened
     # postgres 18.6 on Alpine 3.24 (pushed 2026-09-21), the digest development and CI use.
     image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
-    # The entrypoint starts as root, fixes data-directory ownership, then drops to "postgres".
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    # Started directly as its own uid on a data directory the bootstrap already owns to it, so
+    # the entrypoint has nothing to chown and needs no capabilities at all.
+    user: "10011:10011"
     env_file: [db.env]
     environment:
       POSTGRES_USER: chitthi
@@ -83,6 +89,7 @@ services:
     image: ${CHITTHI_MIGRATE_IMAGE:?set CHITTHI_MIGRATE_IMAGE}
     restart: "no"
     profiles: [migrate]
+    user: "10010:10010"
     env_file: [migrate.env]
     mem_limit: 128m
     networks: [backend]
@@ -92,6 +99,7 @@ services:
   api:
     <<: *hardened
     image: ${CHITTHI_API_IMAGE:?set CHITTHI_API_IMAGE}
+    user: "10010:10010"
     env_file: [api.env]
     # Pinned here, not in the secret store: these can't be changed by editing api.env, because
     # `environment` wins over `env_file`.

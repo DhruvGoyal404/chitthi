@@ -42,7 +42,9 @@ secret() { openssl rand -hex 24; }
 write_stack() { # <dir> <data dir>
   local dir=$1 data=$2 owner_pw api_pw
   owner_pw=$(secret) api_pw=$(secret)
-  mkdir -p "$dir" "$data"
+  mkdir -p "$dir" "$data/pg"
+  # Owned the way deploy/host/bootstrap.sh owns them on the VM: Postgres runs as 10011.
+  sudo chown 10011:10011 "$data/pg" && sudo chmod 0700 "$data/pg"
   cp "$repo/deploy/chitthi/compose.yaml" "$dir/"
   umask 077
   printf 'CHITTHI_API_IMAGE=%s\nCHITTHI_MIGRATE_IMAGE=%s\nCHITTHI_WEB_IMAGE=%s\nCHITTHI_DATA=%s\n' \
@@ -57,7 +59,7 @@ write_stack() { # <dir> <data dir>
 write_stack "$work/chitthi" "$work/data"
 # Media on RAM-backed /dev/shm, as in the e2e job: the API refuses uploads below max(15 %, 2 GB)
 # free, and runner disks can be fuller than that. The bind mount below replaces the data-disk one.
-mkdir -p "$media" && sudo chown 1000:1000 "$media"
+mkdir -p "$media" && sudo chown 10010:10010 "$media"
 cat > "$work/chitthi/compose.override.yaml" <<EOF
 services:
   api:
