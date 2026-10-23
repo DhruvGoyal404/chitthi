@@ -242,13 +242,23 @@ v_guard_rules() {
     iptables -C OUTPUT $match -m owner ! --uid-owner 0 -j REJECT || return 1
   done
 }
-# Refused, not merely failing: the endpoint answers 400 to any request without its header, so
-# only "connection refused" proves the REJECT rule is what stopped it.
+# A probe failing isn't proof on its own (the endpoint also refuses requests without its header,
+# and error wording differs between tools), so each probe must fail AND the guard's REJECT rule
+# must have counted its packets.
+rejected() { # <chain>: packets the IMDS REJECT rule in that chain has matched
+  iptables -L "$1" -v -x -n | awk '$3=="REJECT" && $9=="169.254.169.254" { n += $1 } END { print n + 0 }'
+}
 v_guard_host() {
-  setpriv --reuid=nobody --regid=nogroup --clear-groups curl -sS -m 3 -o /dev/null http://169.254.169.254/ 2>&1 | grep -qi refused
+  local before
+  before=$(rejected OUTPUT)
+  ! setpriv --reuid=nobody --regid=nogroup --clear-groups curl -sS -m 3 -o /dev/null http://169.254.169.254/ \
+    && (( $(rejected OUTPUT) > before ))
 }
 v_guard_containers() {
-  docker run --rm "$PROBE_IMAGE" wget -q -T 3 -O /dev/null http://169.254.169.254/ 2>&1 | grep -qi refused
+  local before
+  before=$(rejected DOCKER-USER)
+  ! docker run --rm "$PROBE_IMAGE" wget -q -T 3 -O /dev/null http://169.254.169.254/ \
+    && (( $(rejected DOCKER-USER) > before ))
 }
 # The guard must not cost name resolution: the API needs it for the sign-in providers.
 v_dns() {
