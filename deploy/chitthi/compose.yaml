@@ -107,6 +107,8 @@ services:
       IMAGE_CONCURRENCY: ${CHITTHI_IMAGE_CONCURRENCY:-1}
       IMAGE_MAX_PIXELS: ${CHITTHI_IMAGE_MAX_PIXELS:-24000000}
       IMAGE_CACHE: "false"
+      # 96 MiB of heap + one native sharp decode (~90) + Node's baseline (~35) stays under the
+      # 256 MiB limit, so V8 collects before the cgroup would kill (docs/MAINTENANCE.md).
       NODE_OPTIONS: --max-old-space-size=${CHITTHI_API_HEAP_MB:-96}
     volumes:
       - ${CHITTHI_DATA:-/data/chitthi}/media:/media

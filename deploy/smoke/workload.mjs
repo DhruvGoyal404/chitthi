@@ -162,6 +162,12 @@ check(full.status === 200 && /^attachment/.test(full.headers.get('content-dispos
 const thumb = await call(others[1], 'GET', `/api/attachments/${attachmentId}/thumb`);
 check(thumb.status === 200, `a member gets its thumbnail (${String(thumb.status)})`);
 
+// Two more at the limit, from two people at once: with IMAGE_CONCURRENCY=1 the second waits for
+// the first, so the memory spike is one decode, not two.
+t = performance.now();
+const pair = await Promise.all([upload(others[0], 'max-a.jpg', big, 'image/jpeg'), upload(others[1], 'max-b.jpg', big, 'image/jpeg')]);
+check(pair.every((r) => r.status === 201), `two max-size images uploaded at once both processed in ${ms(t)} (${pair.map((r) => String(r.status)).join(', ')})`);
+
 // One pixel row over the limit: refused before decoding, nothing kept, the API keeps serving.
 const over = await sharp({ create: { width, height: height + 1, channels: 3, background: '#808080' } }).jpeg().toBuffer();
 const refused = await upload(asha, 'over.jpg', over, 'image/jpeg');

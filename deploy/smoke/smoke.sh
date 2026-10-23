@@ -71,6 +71,11 @@ docker compose -p chitthi up -d --wait db
 docker compose -p chitthi run --rm migrate
 docker compose -p chitthi up -d --wait api web
 echo "ok   stack up: db, migrate, api, web"
+# The heap cap the API really runs with (NODE_OPTIONS reaches every node process in the container).
+heap_mb=$(docker compose -p chitthi exec -T api node -e \
+  'console.log(Math.round(require("node:v8").getHeapStatistics().heap_size_limit / 1048576))')
+(( heap_mb > 0 && heap_mb < 160 )) || fail "the API's V8 heap limit is ${heap_mb} MiB; NODE_OPTIONS did not apply"
+echo "ok   API V8 heap limit: ${heap_mb} MiB"
 
 # A second Postgres, configured identically, standing in for the second app's database.
 write_stack "$work/standin" "$work/standin-data"
@@ -182,6 +187,14 @@ for c in "${containers[@]}"; do
   [[ $oom == 0 ]] || fail "$c was OOM-killed $oom time(s) during the smoke test"
 done
 echo "ok   no container hit its memory limit"
+
+# The API's own memory (anon + kernel; its shmem here is uploads on /dev/shm, which on the VM are
+# on disk) must stay clear of its limit: V8's heap cap plus one image decode has to fit under it.
+api_max=$(awk '$2=="chitthi-api-1" && $1=="load" { r=$3+$4; if (r>m) m=r } END { printf "%.0f", m/1048576 }' "$samples")
+api_limit=$(awk '{ printf "%.0f", $1/1048576 }' "${cg[chitthi-api-1]}/memory.max")
+echo "     API: V8 heap limit ${heap_mb} MiB, anon+kernel under load ${api_max} MiB, mem_limit ${api_limit} MiB"
+(( api_max * 10 < api_limit * 9 )) || fail "the API came within 10 % of its memory limit (${api_max} of ${api_limit} MiB)"
+echo "ok   the API stays under 90 % of its memory limit"
 
 curl_edge -fsS -o /dev/null "https://$host/api/health" || fail "the API is not healthy after the workload"
 echo "smoke test passed"
