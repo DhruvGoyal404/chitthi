@@ -50,6 +50,27 @@ type TypingMap = ReadonlyMap<string, ReadonlyMap<string, number>>; // conversati
  * Everything live for one signed-in tab. Each tab has its own socket and engine; the server is the
  * source of truth (sends are idempotent by client message id), so tabs never need to coordinate.
  */
+/** Won't succeed on retry: a 4xx other than a timeout or a rate limit. */
+const isPermanent = (e: unknown): e is ApiError => e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
+
+/**
+ * What a letter reports when some of its files couldn't be uploaded (each file also shows its
+ * own reason). One failure keeps its own wording, prefixed with the file name; several are
+ * counted. Any file refused for good makes the whole letter's failure permanent (Discard, no
+ * Retry); otherwise it stays retryable and a retry re-uploads only those files.
+ */
+export function lettersFailure(failures: readonly { name: string; error: unknown }[], total: number): Error {
+  const [first] = failures;
+  if (failures.length === 1 && first) {
+    if (first.error instanceof ApiError) return new ApiError(first.error.status, first.error.code, `${first.name}: ${first.error.message}`);
+    return first.error instanceof Error ? first.error : new Error("Couldn't upload.");
+  }
+  const message = `${String(failures.length)} of ${String(total)} files couldn't be sent.`;
+  const decisive = failures.find((f) => isPermanent(f.error))?.error ?? first?.error;
+  // Status 0: no server answer for any of them (network): retryable, with the count shown.
+  return decisive instanceof ApiError ? new ApiError(decisive.status, decisive.code, message) : new ApiError(0, 'upload_failed', message);
+}
+
 export class RealtimeClient {
   readonly socket: Socket;
   readonly engine: SyncEngine;
@@ -159,6 +180,9 @@ export class RealtimeClient {
     this.uploads.set(clientMsgId, ctrl);
     try {
       const attachmentIds: string[] = [];
+      // Every file gets its own attempt and its own result: one refused file must not leave the
+      // ones after it untried and looking "in progress".
+      const failures: { name: string; error: unknown }[] = [];
       for (const f of p.files ?? []) {
         if (f.attachment) {
           attachmentIds.push(f.attachment.id);
@@ -175,9 +199,10 @@ export class RealtimeClient {
         } catch (e) {
           if (ctrl.signal.aborted) return; // cancelled: the bubble is already gone
           this.outbox.updateFile(clientMsgId, f.localId, { status: 'failed', error: e instanceof ApiError ? e.message : "Couldn't upload." });
-          throw e instanceof ApiError ? new ApiError(e.status, e.code, `${f.name}: ${e.message}`) : e;
+          failures.push({ name: f.name, error: e });
         }
       }
+      if (failures.length > 0) throw lettersFailure(failures, (p.files ?? []).length);
       const body = p.body.trim() === '' && attachmentIds.length > 0 ? null : p.body;
       const { message } = await api<{ message: Message }>(`/conversations/${p.conversationId}/messages`, {
         method: 'POST',
@@ -189,9 +214,8 @@ export class RealtimeClient {
       if (ctrl.signal.aborted) return;
       // 4xx (other than timeouts and rate limits) won't succeed on retry: show the server's reason.
       // A rate limit, a full disk (507) or a network failure is "failed, retry" with the reason.
-      const permanent = e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
-      const retryable = e instanceof ApiError && (e.status === 429 || e.status === 507 || e.status === 503);
-      this.outbox.fail(clientMsgId, permanent ? e.message : undefined, retryable ? e.message : undefined);
+      const retryable = e instanceof ApiError && [0, 429, 503, 507].includes(e.status);
+      this.outbox.fail(clientMsgId, isPermanent(e) ? e.message : undefined, retryable ? e.message : undefined);
     } finally {
       if (this.uploads.get(clientMsgId) === ctrl) this.uploads.delete(clientMsgId);
     }

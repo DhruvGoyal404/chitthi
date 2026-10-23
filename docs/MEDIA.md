@@ -101,6 +101,7 @@ Rows in `attachments` are never deleted. `deleted_at` says the content is gone, 
 - **Cancel** stops the uploads and removes the letter.
 - If a temporary problem stops an upload (network, rate limit, `503`, `507`), the letter shows the reason and a **Retry** button. Retry re-uploads only the files that failed.
 - A file the server refuses for good (wrong type, too large) shows why, with **Discard** instead of Retry.
+- Every file in a letter gets its own attempt and its own result. If one is refused, the files after it are still tried, and each refused file shows its own reason. Nothing is left looking "in progress". The letter itself says which file failed, or how many did.
 - Uploads use `XMLHttpRequest`, the only browser API that reports upload progress.
 
 **Showing.**

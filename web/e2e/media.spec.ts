@@ -7,6 +7,8 @@ const PNG = Buffer.from(
   'base64',
 );
 const PDF = Buffer.from('%PDF-1.4\n% train tickets\n');
+// A real two-frame animated WebP (made with sharp from a two-frame GIF).
+const ANIMATED_WEBP = 'UklGRsIAAABXRUJQVlA4WAoAAAACAAAAAAAAAAAAQU5JTQYAAAD/////AABBTk1GSAAAAAAAAAAAAAAAAAAAAGQAAAJWUDggMAAAANABAJ0BKgEAAQABQCYloAJ0ugH4AAOwAP7y63/82BXNc+/3/9Lg/S4P0uD/0pAAAEFOTUZGAAAAAAAAAAAAAAAAAAAAZAAAAFZQOCAuAAAAlAEAnQEqAQABAAAAJiWgAnS6AAOYAP77VeP/pcH/0uD/6XB/6XB/G7LOG6QAAA==';
 
 const composer = (page: Page) => page.getByRole('textbox', { name: 'Message' });
 const log = (page: Page) => page.getByRole('log', { name: 'Messages' });
@@ -127,6 +129,20 @@ test('an upload can be cancelled, a failed one retried, and a refused one discar
   await failed.getByRole('button', { name: 'Retry' }).click();
   await expect(log(a.page).getByRole('link', { name: 'Download retry.pdf' })).toHaveCount(1);
   await expect(log(a.page).getByRole('alert')).toHaveCount(0);
+
+  // Two refused files in one letter: each shows its own reason; neither is left "uploading".
+  const animated = Buffer.from(ANIMATED_WEBP, 'base64');
+  await picker(a.page).setInputFiles([
+    { name: 'wave-one.webp', mimeType: 'image/webp', buffer: animated },
+    { name: 'hi-waving-blue-waving-hello.webp', mimeType: 'image/webp', buffer: animated },
+  ]);
+  await composer(a.page).press('Enter');
+  const both = log(a.page).locator('div.letter', { hasText: 'wave-one.webp' });
+  await expect(both.getByRole('list', { name: 'Attachments being sent' }).getByText("Animated images aren't supported. Send a still image.")).toHaveCount(2);
+  await expect(both.getByRole('progressbar')).toHaveCount(0);
+  await expect(both.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+  await both.getByRole('button', { name: 'Discard' }).click();
+  await expect(both).toHaveCount(0);
 
   // Refused for good: HTML dressed as a PNG. No retry; the sender can discard it.
   await sendFile('cat.png', Buffer.from('<!doctype html><script>alert(1)</script>'), 'image/png');
