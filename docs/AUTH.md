@@ -105,6 +105,20 @@ What a block does, in every path (REST and socket), tested in [`api/test/blocks.
 
 **The blocker is told plainly** ("You blocked this person. Unblock them to send messages."), because they can undo it. **The blocked person gets a neutral refusal** ("You can't message this person."). They can still infer the block from it, as in any messenger; hiding a refusal would mean pretending to deliver messages that are thrown away, which this app does not do.
 
+**Product decision: refuse, don't silently drop.** The visible refusal is a deliberate choice, recorded here so it isn't mistaken for an oversight.
+
+**Why:**
+- **Simpler and honest.** The sender's app never shows a message as sent when it wasn't. Ticks, receipts and the outbox need no special case.
+- **It keeps the sequence model intact.** A refused send never gets a `seq`: the database refuses it under the conversation lock, and the rollback takes the number back. So every conversation stays gap-free and identical for every reader.
+
+**The alternative, for later.** Some messengers silently drop the blocked person's messages: the sender sees them as sent, the recipient never receives them. That hides the block better.
+
+**The cost of that alternative:**
+- Either the dropped message is stored with a `seq` that only one participant can see, which breaks "every member reads the same gap-free sequence" (see [SCHEMA.md](SCHEMA.md));
+- or it lives in a separate shadow store outside the sequence, with its own ticks that pretend to be delivered.
+
+Either way, delivery state starts to lie. If it is ever wanted, design it as its own phase with its own invariants. It is not a wording change.
+
 **Groups they already share are unaffected:** both stay members, both still send there, and each sees the other's group messages. The reasons:
 
 - A group belongs to all its members. One member's block can't remove another member, or silently filter what the rest of the group sees and replies to. Hiding some messages from one reader would make that reader's view of the conversation incoherent: replies to messages they can't see, and unread counts that disagree with what is shown.
