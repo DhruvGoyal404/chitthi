@@ -72,15 +72,19 @@ jobs:
           npm audit --audit-level=high 2>&1 | tee audit.log
 
   images:
-    # The production images (api/Dockerfile, web/Dockerfile), built on every push and checked
-    # without a database: non-root, read-only, no capabilities, config refusal, sharp's musl build,
-    # the web page's headers and routing. Publishing them comes with the deploy workflow.
+    # The production images (api/Dockerfile, web/Dockerfile), built on every push and checked on
+    # their own (non-root, read-only, no capabilities, config refusal, sharp's musl build, the web
+    # page's headers and routing), then as the production stack: deploy/chitthi and deploy/edge
+    # brought up as committed, smoke-tested through TLS, and measured for memory
+    # (deploy/smoke/smoke.sh prints the MEMORY table). Publishing comes with the deploy workflow.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Shellcheck
+        run: shellcheck scripts/check-images.sh deploy/smoke/smoke.sh
       - name: Build the API image
         run: docker build -f api/Dockerfile --target api -t chitthi-api:ci .
       - name: Build the migrate image
@@ -93,6 +97,15 @@ jobs:
         run: |
           set -o pipefail
           docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep ':ci '
+      # The smoke workload runs on the runner with the repo's socket.io-client and sharp.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (npm ci)
+        run: npm ci
+      - name: Smoke-test and measure the production stack
+        run: deploy/smoke/smoke.sh chitthi-api:ci chitthi-migrate:ci chitthi-web:ci
 
   perf:
     # Timing-sensitive tests (npm run test:perf): their own job, so they can't make the main

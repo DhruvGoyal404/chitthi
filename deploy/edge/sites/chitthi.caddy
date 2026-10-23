@@ -1,0 +1,31 @@
+# Chitthi: /api/* (REST and the Socket.IO WebSocket at /api/socket.io) to the API, everything else
+# to the web container. Both listen on loopback only (deploy/chitthi/compose.yaml).
+# The page's own headers (CSP with frame-ancestors, nosniff, DENY) come from the web image, and the
+# API's from helmet; this file adds only what belongs to the HTTPS edge.
+chitthi.dhruvgoyal.tech {
+	header {
+		# No includeSubDomains: other dhruvgoyal.tech hosts are not this app's to decide.
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# A coarse outer cap; the API enforces the real limits (25 MB per file) while streaming.
+	request_body {
+		max_size 30MB
+	}
+
+	handle /api/* {
+		# Caddy replaces any X-Forwarded-For a client sends with the real peer address, and the API
+		# trusts exactly one proxy hop (TRUST_PROXY=1), so rate limits see the client's IP.
+		reverse_proxy 127.0.0.1:8082
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:5175
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

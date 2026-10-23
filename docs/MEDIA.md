@@ -45,7 +45,7 @@ The upload is one multipart part, streamed with busboy. It needs a session and a
      | `IMAGE_MAX_PIXELS` | 50000000 | 1000000–50000000 | larger images get `413 too_large`: "That image has too many pixels. Photos can be up to N megapixels." |
      | `IMAGE_CACHE` | `true` | `true`/`false` | sharp's process-wide cache; `false` saves memory |
 
-     Production sets them from memory measurements of the production stack (Phase 7).
+     Production runs with `1`, `24000000` and `false` ([deploy/chitthi/compose.yaml](../deploy/chitthi/compose.yaml)): a 24 MP photo peaks the API at about 130 MiB, and the measurements behind that are in [MAINTENANCE.md](MAINTENANCE.md#memory-budget).
 6. **Byte quota.** 200 MB per user per day, charged with what was actually written (main file and thumbnail). Going over removes the upload again.
 7. **The `attachments` row.** It is written last, and if it is refused the stored files are removed. The response:
 

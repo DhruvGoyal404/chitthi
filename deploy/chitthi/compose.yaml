@@ -1,0 +1,138 @@
+# Chitthi in production: Postgres, the API and the static web app, behind the shared edge Caddy
+# (deploy/edge). Lives in /srv/chitthi on the VM; data lives on the data disk under /data/chitthi.
+#
+# Files next to this one (written by the deploy script, never committed):
+#   .env         image references by digest, CHITTHI_DATA. No secrets: `compose config` prints it.
+#   db.env       POSTGRES_PASSWORD
+#   migrate.env  MIGRATION_DATABASE_URL (owner), DATABASE_URL (chitthi_api)
+#   api.env      DATABASE_URL (chitthi_api), GOOGLE_*/GITHUB_* client ids and secrets
+# Each container gets only its own secrets: the API never sees the owner's password.
+#
+# Memory limits come from measurements of this stack under the smoke workload (docs/MAINTENANCE.md,
+# "Memory budget"). A container that overruns its limit is killed and restarted on its own; the
+# host and the other app keep running. The CHITTHI_*_MEM overrides exist for measuring, not for
+# production.
+name: chitthi
+
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+  logging:
+    driver: local
+    options: { max-size: 10m, max-file: "3" }
+
+services:
+  db:
+    <<: *hardened
+    # postgres 18.6 on Alpine 3.24 (pushed 2026-09-21), the digest development and CI use.
+    image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    # The entrypoint starts as root, fixes data-directory ownership, then drops to "postgres".
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    env_file: [db.env]
+    environment:
+      POSTGRES_USER: chitthi
+      POSTGRES_DB: chitthi
+    # Small on purpose: a few users on a 1 GB VM that also runs a second app. Parallel query and
+    # JIT are off (both cost memory per query); 20 connections cover the API's pool of 10, its
+    # LISTEN client, migrations and pg_dump.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - effective_cache_size=96MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=16MB
+      - -c
+      - max_connections=20
+      - -c
+      - max_worker_processes=4
+      - -c
+      - max_parallel_workers=0
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - autovacuum_max_workers=2
+      - -c
+      - jit=off
+      - -c
+      - huge_pages=off
+      - -c
+      - max_wal_size=256MB
+    volumes:
+      - ${CHITTHI_DATA:-/data/chitthi}/pg:/var/lib/postgresql
+    tmpfs:
+      - /var/run/postgresql
+      - /tmp
+    shm_size: 32m
+    mem_limit: ${CHITTHI_DB_MEM:-160m}
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chitthi -d chitthi"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # One-off, before the API starts on new code: `docker compose run --rm migrate`.
+  migrate:
+    <<: *hardened
+    image: ${CHITTHI_MIGRATE_IMAGE:?set CHITTHI_MIGRATE_IMAGE}
+    restart: "no"
+    profiles: [migrate]
+    env_file: [migrate.env]
+    mem_limit: 128m
+    networks: [backend]
+    depends_on:
+      db: { condition: service_healthy }
+
+  api:
+    <<: *hardened
+    image: ${CHITTHI_API_IMAGE:?set CHITTHI_API_IMAGE}
+    env_file: [api.env]
+    # Pinned here, not in the secret store: these can't be changed by editing api.env, because
+    # `environment` wins over `env_file`.
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8082"
+      WEB_ORIGINS: https://chitthi.dhruvgoyal.tech
+      PUBLIC_ORIGIN: https://chitthi.dhruvgoyal.tech
+      TRUST_PROXY: "1"
+      LOG_LEVEL: info
+      MEDIA_DIR: /media
+      IMAGE_CONCURRENCY: ${CHITTHI_IMAGE_CONCURRENCY:-1}
+      IMAGE_MAX_PIXELS: ${CHITTHI_IMAGE_MAX_PIXELS:-24000000}
+      IMAGE_CACHE: "false"
+      NODE_OPTIONS: --max-old-space-size=${CHITTHI_API_HEAP_MB:-96}
+    volumes:
+      - ${CHITTHI_DATA:-/data/chitthi}/media:/media
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:8082:8082"
+    mem_limit: ${CHITTHI_API_MEM:-256m}
+    stop_grace_period: 15s
+    # backend: Postgres. egress: the OAuth providers (Google, GitHub) and the published port.
+    networks: [backend, egress]
+    depends_on:
+      db: { condition: service_healthy }
+
+  web:
+    <<: *hardened
+    image: ${CHITTHI_WEB_IMAGE:?set CHITTHI_WEB_IMAGE}
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:5175:5175"
+    mem_limit: ${CHITTHI_WEB_MEM:-32m}
+    networks: [egress]
+
+networks:
+  # No route out: Postgres is reachable only from the API and the migrate job.
+  backend:
+    internal: true
+  egress: {}

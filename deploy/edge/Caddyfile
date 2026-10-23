@@ -1,0 +1,23 @@
+# The edge: the only process on the VM that faces the internet (80 and 443). It terminates TLS
+# with Let's Encrypt certificates and routes each hostname to its app's loopback ports. One file
+# per app in sites/; adding an app never edits another app's file.
+{
+	email {$ACME_EMAIL}
+	# Empty in production. CI sets "local_certs" (an internal CA, no ACME); a first setup can set
+	# "acme_ca https://acme-staging-v02.api.letsencrypt.org/directory" to spare the rate limits.
+	{$EDGE_CA_OPTION}
+	# Only reachable from inside the container (docker compose exec edge caddy reload ...).
+	admin unix//run/caddy/admin.sock
+	servers {
+		# HTTP/3 needs UDP 443, which the network security group doesn't open.
+		protocols h1 h2
+	}
+}
+
+# Liveness for the container healthcheck: plain HTTP, loopback only, never routed to an app.
+http://127.0.0.1:2080 {
+	bind 127.0.0.1
+	respond "ok"
+}
+
+import /etc/caddy/sites/*.caddy
