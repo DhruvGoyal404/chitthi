@@ -22,15 +22,23 @@ The deploy target is a plain Ubuntu VM behind Caddy, with no cloud-specific code
 - **`TRUST_PROXY=1`** behind exactly one Caddy. **`PUBLIC_ORIGIN`** must be the public https origin, and the OAuth redirect URIs registered with Google and GitHub must match it.
 - **`frame-ancestors 'none'`**, plus the page CSP, as response headers from Caddy. A meta CSP can't set `frame-ancestors`.
 
-## Known issue: flaky dark-mode accessibility e2e
+## Resolved: the "flaky" accessibility e2e
 
-- **Test:** `web/e2e/a11y.spec.ts`, "every screen meets WCAG 2.1 AA (dark)" (mobile project).
-- **What happened:** once, locally, on a loaded machine (the run took 6.2 minutes against the usual 4–5), the test timed out after 10 s waiting for the search result button for the other user's handle in `openDm()`. It passed 4/4 on a re-run, and CI's e2e passed on the same commit. The trace was overwritten by the passing re-run.
-- **Hypothesis:** a slow request against a fixed 10 s wait, not debounce.
-  - `useUserSearch` has no debounce, and Playwright's `fill()` sets the whole handle in one change, so exactly one search request is made.
-  - On a saturated machine, that request's database work (the rate-limit write, then the search) can exceed the API's 5 s statement and connection timeouts, which happened twice this phase. The resulting 5xx is retried twice by the client (about 1 s and 2 s of backoff), and the total passes Playwright's 10 s expect timeout.
-- **Planned fix:**
-  - `openDm()` waits for the `/api/users?q=` response and asserts it was 200, so a failure names its cause (a status, or no response) instead of "element not found".
-  - Playwright keeps the trace of a failed attempt even when its retry passes, and CI uploads the report on every run, so the next occurrence leaves evidence.
-  - The accessibility suite creates its DM through the API, because its subject is accessibility, not search. `screens.spec.ts` still covers search through the UI.
-- **If it recurs after that:** read the kept trace before changing timeouts.
+**Test:** `web/e2e/a11y.spec.ts`, "every screen meets WCAG 2.1 AA". It failed locally twice: once dark/mobile, once light/desktop. Each time the search result for the other user's handle never appeared within 10 s. CI never failed.
+
+**The cause.** Confirmed with a kept trace.
+- The new-conversation step searched only the **first 5 characters** of the handle (`axB_6…`).
+- Search returns at most 8 people, sorted by handle: the Phase 5 anti-enumeration cap.
+- Every local e2e run adds users to the dev database. When this was found, 12 users matched `axb_6`, so the test's own user could be cut off.
+- In the trace the request returned 200 in 54 ms, with 8 people and not the expected one.
+- That makes it data-dependent, not timing-dependent. It depends on the random first hex digit of the handle and on how many earlier runs ran against the same database. CI starts from a fresh database, so it never saw it.
+
+**The first hypothesis was wrong.** It was "a slow request on a loaded machine against a fixed 10 s wait". The trace kept by the change below disproved it.
+
+**Fixed at the end of Phase 6** (the e2e fix commit after these notes):
+- The step searches the full handle, which is unique.
+- `openDm()` waits for the `/api/users?q=` response and asserts it was 200, so a failing search names its cause.
+- The accessibility suite creates its DM through the API, because its subject is accessibility, not search. `screens.spec.ts` covers search through the UI.
+- Playwright keeps the trace of a failed attempt, and CI uploads the report on every run, so a failure that passes on retry still leaves evidence.
+
+**Lesson for later suites.** Any e2e step that searches by a short prefix will eventually collide with leftovers in a long-lived dev database. Search by the full, random handle. The screenshot spec had the same bug with "meera" and was fixed the same way.

@@ -18,10 +18,25 @@ export async function signedIn(browser: Browser, prefix = 'e2e', opts: Parameter
   return { context, page, handle: h, id: user.id };
 }
 
-/** Starts (or opens) a DM from `page` with the user whose handle is `other`. */
+/**
+ * Starts (or opens) a DM through the API, for tests whose subject isn't search. Returns its id;
+ * the page stays where it was.
+ */
+export async function dmViaApi(page: Page, otherUserId: string): Promise<string> {
+  const res = await page.request.post('/api/conversations/direct', { data: { userId: otherUserId }, headers: { Origin: new URL(page.url()).origin } });
+  expect(res.ok(), `create DM: ${String(res.status())}`).toBe(true);
+  return ((await res.json()) as { conversation: { id: string } }).conversation.id;
+}
+
+/** Starts (or opens) a DM from `page` with the user whose handle is `other`, through the UI search. */
 export async function openDm(page: Page, other: string): Promise<string> {
   await page.goto('/new');
+  // Wait for the search itself and check it: a slow or failing request (seen once on a loaded
+  // machine) then fails here with its status, not later as "button not found".
+  const searched = page.waitForResponse((r) => r.request().method() === 'GET' && r.url().includes('/api/users?q='));
   await page.getByLabel('Find someone by handle').fill(other);
+  const res = await searched;
+  expect(res.status(), `handle search for ${other}`).toBe(200);
   await page.getByRole('button', { name: new RegExp(other) }).click();
   await page.waitForURL(/\/c\/[0-9a-f-]{36}$/);
   return page.url().split('/c/')[1] ?? '';

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { expectAccessible, handle, openDm, pendingSignup, signedIn } from './helpers.js';
+import { dmViaApi, expectAccessible, handle, pendingSignup, signedIn } from './helpers.js';
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`every screen meets WCAG 2.1 AA (${scheme})`, async ({ browser, page }) => {
@@ -23,7 +23,10 @@ for (const scheme of ['light', 'dark'] as const) {
 
     const a = await signedIn(browser, 'axA', { colorScheme: scheme });
     const b = await signedIn(browser, 'axB', { colorScheme: scheme });
-    const dm = await openDm(a.page, b.handle);
+    // The DM is set up through the API: this suite is about accessibility, and search has
+    // its own coverage (screens.spec.ts).
+    const dm = await dmViaApi(a.page, b.id);
+    await a.page.goto(`/c/${dm}`);
     const say = async (p: Page, text: string) => {
       await p.getByRole('textbox', { name: 'Message' }).fill(text);
       await p.getByRole('textbox', { name: 'Message' }).press('Enter');
@@ -50,7 +53,9 @@ for (const scheme of ['light', 'dark'] as const) {
 
     // New DM search, and a new group with a chosen member.
     await a.page.goto('/new');
-    await a.page.getByLabel('Find someone by handle').fill(b.handle.slice(0, 5));
+    // The full handle: search shows at most 8 people (sorted), and a dev database that has seen
+    // many e2e runs holds more than 8 "axB_…" users sharing any short prefix.
+    await a.page.getByLabel('Find someone by handle').fill(b.handle);
     await expect(a.page.getByRole('button', { name: new RegExp(b.handle) })).toBeVisible();
     await expectAccessible(a.page, 'new conversation');
     await a.page.goto('/new/group');

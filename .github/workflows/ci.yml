@@ -162,8 +162,10 @@ jobs:
         run: npm run e2e:install -w web
       - name: End-to-end tests (390 px and desktop, axe on every screen)
         run: npm run e2e
-      - name: Upload the Playwright report on failure
-        if: failure()
+      # Every run, not only failed ones: a test that failed once and passed on its retry still
+      # leaves its trace here (retain-on-failure keeps the failed attempt).
+      - name: Upload the Playwright report
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: playwright-report
