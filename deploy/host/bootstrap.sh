@@ -35,7 +35,8 @@ export DEBIAN_FRONTEND=noninteractive
 # fixes arrive through unattended-upgrades like every other package.
 log "packages"
 apt-get update -q
-packages=(ca-certificates curl jq ufw unattended-upgrades iptables)
+# age and rclone: the encrypted, append-only backups (deploy/host/backup.sh).
+packages=(ca-certificates curl jq ufw unattended-upgrades iptables age rclone)
 if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
   packages+=(docker.io docker-compose-v2)
 fi

@@ -100,6 +100,7 @@ function DeleteAccount() {
         <li>You leave every group. Groups you own pass to an admin, or else the longest-standing member.</li>
         <li>Your letters stay for the people you wrote to, signed "Deleted user". Chats with you take no new messages.</li>
         <li>Your handle stays unavailable to anyone else for 30 days.</li>
+        <li>Encrypted backups still hold what you erase for up to 12 weeks, until they expire.</li>
       </ul>
       <label className="flex min-h-11 items-start gap-3 text-sm text-ink">
         <input type="checkbox" checked={erase} onChange={(e) => { setErase(e.target.checked); }} className="mt-0.5 h-4 w-4 accent-[var(--seal)]" />

@@ -150,6 +150,87 @@ throughout. The scenarios:
 At the end, `other.caddy`, the main `Caddyfile`, and the edge's `compose.yaml` and `.env` must be
 byte-identical to before, and the other site must still answer.
 
+## Backups
+
+[`deploy/host/backup.sh`](../deploy/host/backup.sh), installed by every deploy at
+`/srv/chitthi/bin/backup.sh` with its systemd timers.
+
+**What runs when:**
+
+| Run | When | What |
+|---|---|---|
+| `chitthi-backup.timer` → `backup.sh run` | nightly, 20:30 UTC (02:00 IST), before the reboot window | Database dump, new media, manifest; to Azure Blob, then to R2 |
+| `chitthi-restore-drill.timer` → `backup.sh drill` | the 1st of each month, 23:00 UTC | Restores the newest backup into a scratch database and verifies it |
+| `backup.sh selftest` | once at setup, through Run Command | Proves the VM's real credentials can create but not overwrite or delete |
+
+Both timer services are capped at 256 MB and run at idle CPU and I/O priority.
+
+**Append-only by design.** The VM never deletes or overwrites a backup:
+- **Azure:** the VM's identity has a custom role with only `blobs/read` and `blobs/add/action`,
+  scoped to the backup container. Every upload is a single Put Blob with `If-None-Match: *`.
+  (Put Block needs `write`, which the role doesn't have.)
+- **R2:** objects are copied with `rclone copy --immutable`, or streamed for media the bucket
+  doesn't have yet. The bucket lock refuses overwrites and deletes for 30 days.
+- **Not restic.** restic must delete its own lock files, and `--no-lock` isn't supported for
+  `backup` (restic issue #1544).
+
+**What a night's run writes:**
+- `db/YYYY/MM/DD/chitthi-<UTC>.dump.age`: `pg_dump -Fc`, age-encrypted to a public key, plus a
+  `.sha256` object next to it.
+- `media/<key>.age` for each stored file the bucket doesn't have yet. Keys are random and never
+  reused, so an existing key is already correct.
+- `manifests/<UTC>.json`, uploaded last. It records the dump's name and sha256, the schema version,
+  the message and attachment counts taken just before the dump, and every media key that existed.
+  A restore uses exactly what a manifest lists.
+
+**What the drill checks:**
+- the newest manifest's dump against both its sha256 records;
+- decryption, with the private key fetched from Key Vault into memory only;
+- `pg_restore` into `chitthi_restore`;
+- the schema version, and message and attachment counts at least those recorded;
+- up to five media files, decrypted and checked against `attachments.sha256`;
+- the R2 copy of the dump, byte for byte.
+
+It then drops the scratch database.
+
+**Alerts and freshness:**
+- healthchecks.io gets start, success and failure pings, with a one-line reason and never a
+  secret. Its 26-hour freshness window catches a backup that silently didn't run.
+- Every deploy also fails if a timer isn't active or the last successful backup is more than 26
+  hours old, once the first night is past.
+
+**Key Vault secrets used** (on top of the deploy's):
+
+| Secret | Used for |
+|---|---|
+| `chitthi-backup-age-recipient` | The public key backups are encrypted to |
+| `chitthi-backup-age-identity` | The private key, read by the drill only |
+| `chitthi-r2-endpoint`, `chitthi-r2-access-key-id`, `chitthi-r2-secret-access-key` | The R2 copy |
+| `chitthi-hc-backup-url`, `chitthi-hc-drill-url` | healthchecks.io ping URLs |
+
+**Retention is the storage's job, never the VM's:**
+- **Dumps and manifests:** lifecycle rules delete `db/`, `manifests/` and `selftest/` 35 days after
+  creation, on Azure and on R2 (R2's lock ends at 30). Azure's soft delete keeps deleted blobs 14
+  more days.
+- **Media isn't deleted by age,** because files still in use are old too. Once a month, the owner
+  runs the compaction script in Cloud Shell, under their own identity. It deletes media that no
+  manifest from the last 35 days lists. The VM still never deletes.
+
+**What that means for privacy.** A message deleted for everyone, or an erased account's messages,
+lives on in dumps for up to about 7 weeks (35 days plus 14 of soft delete). Files can last up to
+about 12 weeks: listed by manifests for 35 days, up to a month until the next compaction, then 14
+days of soft delete. The app says so in Settings and on the account-deletion screen.
+
+**Tested in CI on every push** (`deploy/host/test-deploy.sh`), with folders standing in for the
+two buckets. It runs:
+- two nightly runs: two dumps and manifests, media uploaded once, R2 in step, dumps unreadable
+  without the key;
+- a drill that passes;
+- a tampered dump the drill catches;
+- a deploy that confirms the timers and the fresh backup.
+
+The Azure REST calls and R2 permissions themselves are proven on the VM by `backup.sh selftest`.
+
 ## Memory budget
 
 The VM has 1 GiB, of which roughly 900 MiB is visible to Linux; confirm with `free -m` when the

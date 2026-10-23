@@ -6,6 +6,8 @@ A real-time chat app: 1:1 and group conversations, durable ordered history, read
 
 **Not end-to-end encrypted.** Messages are stored in plaintext on the server, which can read them. There are no voice or video calls.
 
+**Backups keep deleted content for a while.** Nightly encrypted backups are append-only, so a message deleted for everyone, or an erased account's messages and files, stays in them until they expire: up to about 7 weeks for messages and up to 12 weeks for files ([docs/MAINTENANCE.md](docs/MAINTENANCE.md#backups)).
+
 ## Screens
 
 The look is the old blue inland letter: pale blue paper, letters with a folded corner (yours on cream airmail paper), postage-stamp avatars, and a postmark for "read".

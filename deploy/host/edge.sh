@@ -57,7 +57,7 @@ edge() { docker compose -p edge --project-directory "$EDGE" -f "$EDGE/compose.ya
 # edge itself (same image, uid and capabilities), never touching the running one.
 image=$(docker compose -p edge --project-directory "$work" -f "$work/compose.yaml" --env-file "$work/.env" config --images)
 docker run --rm --network none --read-only --user "$EDGE_UID:$EDGE_UID" --cap-drop ALL --cap-add NET_BIND_SERVICE \
-  --security-opt no-new-privileges --tmpfs /config --tmpfs /data --env-file "$work/.env" \
+  --security-opt no-new-privileges --tmpfs "/config:uid=$EDGE_UID,gid=$EDGE_UID,mode=0700" --tmpfs "/data:uid=$EDGE_UID,gid=$EDGE_UID,mode=0700" --env-file "$work/.env" \
   -v "$work/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$EDGE/sites:/etc/caddy/sites:ro" \
   "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>"$work/validate.log" \
   || { cat "$work/validate.log" >&2; die "the new Caddyfile does not validate with the current site files"; }

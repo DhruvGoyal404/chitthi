@@ -70,6 +70,7 @@ export function Settings() {
         <div className="space-y-2">
           <Link to="/account" className={buttonClass('ghost')}>Account and sign-in</Link>
           <p className="text-sm text-ink-soft">Messages are not end-to-end encrypted: the server can read them.</p>
+          <p className="text-sm text-ink-soft">Deleted messages and files stay in encrypted backups for up to 12 weeks.</p>
           <Button variant="ghost" onClick={() => { signOut.mutate(undefined, { onSettled: () => { void navigate('/signin', { replace: true }); } }); }}>
             Sign out
           </Button>
