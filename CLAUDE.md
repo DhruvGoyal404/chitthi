@@ -85,6 +85,17 @@ npm run dev:api             # API on 127.0.0.1:8082
 npm run dev:web             # web on http://localhost:5175 (proxies /api, including WebSockets, to 8082)
 npm run typecheck && npm run lint && npm test   # the full gate (deterministic)
 npm run test:perf          # timing-sensitive tests (200-socket latency, 20 concurrent senders); own CI job
+npm run test:e2e           # Playwright (same as npm run e2e); stop the dev stack first (ports 5175/8082)
+npm run dev:reset-media    # delete all dev uploads (.data/media and attachment rows) after a manual pass
 ```
+
+**Tests never touch development data:**
+- **API tests** use their own `chitthi_test` database, recreated on every run.
+- **e2e runs** use `chitthi_e2e`:
+  - `api/scripts/e2e-db.ts` drops, recreates and migrates it before the API starts.
+  - It refuses any database whose name doesn't end in `_e2e` or `_test`, and any media folder inside `.data`.
+  - Uploads go to a temporary media folder that is emptied before the run and deleted after it (`/dev/shm` in CI).
+- **Running servers are never reused.** With the dev stack up, e2e fails on the busy ports instead of touching the dev database.
+- **The dev database and `.data/media` are only ever changed by you:** the dev stack, `db:migrate` and `dev:reset-media`.
 
 Dev sign-in shortcut: set `DEV_LOGIN=true` with `NODE_ENV=development` or `test`. The config refuses to load it in any other environment, and the router throws if it is built anyway. It is rate-limited per IP and subject to the Origin check.

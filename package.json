@@ -24,7 +24,8 @@
     "db:rollback": "dbmate --env MIGRATION_DATABASE_URL --no-dump-schema rollback",
     "db:new": "dbmate new",
     "check:bundle": "node scripts/check-bundle.mjs",
-    "e2e": "npm run e2e -w web"
+    "e2e": "npm run e2e -w web",
+    "test:e2e": "npm run e2e -w web"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
