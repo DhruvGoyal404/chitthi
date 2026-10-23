@@ -36,7 +36,16 @@ The upload is one multipart part, streamed with busboy. It needs a session and a
    - The format family is kept, except that static GIFs become PNG. Animated images are refused.
    - The long edge is capped at 2560 px. If the result is still over 10 MB, it is retried at 1600 px.
    - Each image gets a 480 px WebP thumbnail and a tiny (about 16 px) WebP placeholder stored inline, so a chat can reserve the right space before anything loads.
-   - Decoding stops above 50 megapixels (decompression bombs). At most two images are processed at once.
+   - Decoding stops above 50 megapixels (decompression bombs). At most two images are processed at once; the others wait their turn.
+   - A small server can tighten these, never loosen them:
+
+     | Key | Default | Allowed | Effect |
+     |---|---|---|---|
+     | `IMAGE_CONCURRENCY` | 2 | 1–2 | images decoded at once |
+     | `IMAGE_MAX_PIXELS` | 50000000 | 1000000–50000000 | larger images get `413 too_large`: "That image has too many pixels. Photos can be up to N megapixels." |
+     | `IMAGE_CACHE` | `true` | `true`/`false` | sharp's process-wide cache; `false` saves memory |
+
+     Production sets them from memory measurements of the production stack (Phase 7).
 6. **Byte quota.** 200 MB per user per day, charged with what was actually written (main file and thumbnail). Going over removes the upload again.
 7. **The `attachments` row.** It is written last, and if it is refused the stored files are removed. The response:
 

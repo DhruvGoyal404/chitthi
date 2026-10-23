@@ -8,7 +8,7 @@ import { DISK_GUARD_DEFAULTS } from '../config.js';
 import { HttpError } from '../errors.js';
 import type { RateLimits } from '../limits.js';
 import type { SessionStore } from '../sessions.js';
-import { IMAGE_MAX_BYTES, ImageRejected, processImage } from './image.js';
+import { IMAGE_MAX_BYTES, imageProcessor, ImageRejected, type ImageProcessor } from './image.js';
 import { displayName, type StoredMime } from './names.js';
 import { NotTextError, SNIFF_BYTES, sniff, TextGuard, type Detected } from './sniff.js';
 import { StorageError, TooLargeError, type Storage, type StoredObject } from './storage.js';
@@ -31,9 +31,10 @@ const unsupported = () => new HttpError(415, 'unsupported_type', 'Chitthi takes 
 const tooLarge = (kind: 'image' | 'file') =>
   new HttpError(413, 'too_large', kind === 'image' ? 'Photos can be up to 10 MB.' : 'Files can be up to 25 MB.');
 
-const IMAGE_ERRORS: Record<ImageRejected['reason'], () => HttpError> = {
+const IMAGE_ERRORS: Record<ImageRejected['reason'], (maxPixels: number) => HttpError> = {
   animated: () => new HttpError(415, 'unsupported_type', "Animated images aren't supported. Send a still image."),
-  too_many_pixels: () => new HttpError(413, 'too_large', 'That image has too many pixels.'),
+  too_many_pixels: (maxPixels) =>
+    new HttpError(413, 'too_large', `That image has too many pixels. Photos can be up to ${String(Math.floor(maxPixels / 1_000_000))} megapixels.`),
   too_large: () => new HttpError(413, 'too_large', 'Photos can be up to 10 MB.'),
   unreadable: () => new HttpError(415, 'unsupported_type', "That image couldn't be read."),
   mismatch: () => new HttpError(415, 'unsupported_type', "That image couldn't be read."),
@@ -120,12 +121,15 @@ type Stored = {
  * (10 MB images, 25 MB files) is enforced while reading, and going over answers 413 at once and
  * closes the connection. Nothing is kept from a refused upload.
  */
-export function uploadsRouter(pool: pg.Pool, sessions: SessionStore, storage: Storage, rateLimits: RateLimits, logger: Logger, guard = diskGuard(storage, logger)): Router {
+export function uploadsRouter(
+  pool: pg.Pool, sessions: SessionStore, storage: Storage, rateLimits: RateLimits, logger: Logger,
+  guard = diskGuard(storage, logger), images: ImageProcessor = imageProcessor(),
+): Router {
   const router = Router();
 
   async function store(detected: Detected, body: AsyncIterable<Buffer>, clientName: string | undefined): Promise<Stored> {
     if (detected.kind === 'image') {
-      const img = await processImage(await collect(body, IMAGE_MAX_BYTES), detected.format);
+      const img = await images.process(await collect(body, IMAGE_MAX_BYTES), detected.format);
       const main = await storage.put(Readable.from([img.data]));
       let thumb: StoredObject;
       try {
@@ -227,7 +231,7 @@ export function uploadsRouter(pool: pg.Pool, sessions: SessionStore, storage: St
       if (err instanceof HttpError) throw err;
       if (err instanceof TooLargeError) throw tooLarge(err.maxBytes > IMAGE_MAX_BYTES ? 'file' : 'image');
       if (err instanceof NotTextError) throw unsupported();
-      if (err instanceof ImageRejected) throw IMAGE_ERRORS[err.reason]();
+      if (err instanceof ImageRejected) throw IMAGE_ERRORS[err.reason](images.limits.maxInputPixels);
       if (err instanceof StorageError) {
         logger.error({ err }, 'media storage write failed');
         throw new HttpError(503, 'storage_unavailable', "Couldn't save the file. Try again in a moment.");

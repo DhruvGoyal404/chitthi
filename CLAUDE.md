@@ -10,7 +10,7 @@ Never use WhatsApp's name, logo, colours or look anywhere in the product.
 - **Voice and video calls.** There is no signalling, WebRTC or call UI. The legacy stubs were removed; don't add new ones.
 - **Voice notes and video attachments.** Media is photos and files only (Phase 6). Audio and video uploads are refused by the type allowlist.
 
-Stretch goals, only after Phase 7: message search (Postgres full-text) and web push notifications.
+Stretch goals, only after Phase 7: message search (Postgres full-text), web push notifications, and a presigned object-storage adapter for media.
 
 ## Stack
 
@@ -72,7 +72,7 @@ These hold for every change. A change that breaks one of them is a bug, even if 
   - web: attach / drag-and-drop / paste, previews, progress, cancel, retry, lightbox.
 
   Tests cover spoofed types, polyglots, mid-stream cut-off, traversal names, EXIF stripping, non-member and left-member access, the sweeper, quotas and disk failure. **Done.** Voice notes and video are out of scope (see Non-goals). |
-| 7 | Deploy | Production images (Node 22 LTS, non-root, pinned digests). A presigned object-storage adapter. CI covers lint, typecheck, test and build. On a clean checkout, `docker compose -p chitthi up` serves web, API and DB on the assigned ports. Secrets live only in the platform's secret store. |
+| 7 | Deploy | Production images (Node 22 LTS, non-root, pinned digests). Media stays on the VM's data disk through the existing local driver; a presigned object-storage adapter is a stretch goal. CI covers lint, typecheck, test and build. On a clean checkout, `docker compose -p chitthi up` serves web, API and DB on the assigned ports. Secrets live only in the platform's secret store. |
 
 ## Commands
 

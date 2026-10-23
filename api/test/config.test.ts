@@ -31,6 +31,18 @@ describe('config', () => {
     expect(() => loadConfig({ NODE_ENV: 'development', ...db, MEDIA_MIN_FREE_PERCENT: '150' })).toThrow(/MEDIA_MIN_FREE_PERCENT/);
   });
 
+  it('image limits: defaults outside production too; a small VM may only tighten them', () => {
+    const db = { DATABASE_URL: 'postgres://u:p@127.0.0.1:5435/chitthi' };
+    const prod = { NODE_ENV: 'production', ...db, MEDIA_DIR: process.platform === 'win32' ? 'D:\\media' : '/var/lib/chitthi/media' };
+    expect(loadConfig({ NODE_ENV: 'development', ...db }).images).toEqual({ concurrency: 2, maxInputPixels: 50_000_000, cache: true });
+    expect(loadConfig({ ...prod, IMAGE_CONCURRENCY: '1', IMAGE_MAX_PIXELS: '24000000', IMAGE_CACHE: 'false' }).images)
+      .toEqual({ concurrency: 1, maxInputPixels: 24_000_000, cache: false });
+    expect(loadConfig({ ...prod, IMAGE_CONCURRENCY: '', IMAGE_MAX_PIXELS: '', IMAGE_CACHE: '' }).images).toEqual({ concurrency: 2, maxInputPixels: 50_000_000, cache: true });
+    for (const [key, value] of [['IMAGE_CONCURRENCY', '0'], ['IMAGE_CONCURRENCY', '3'], ['IMAGE_MAX_PIXELS', '60000000'], ['IMAGE_MAX_PIXELS', '999'], ['IMAGE_CACHE', 'no']] as const) {
+      expect(() => loadConfig({ ...prod, [key]: value })).toThrow(new RegExp(key));
+    }
+  });
+
   it('rejects bad values and names the key without echoing the value', () => {
     const badUrl = `mysql://root:${DB_PASSWORD}@db/x`;
     let message = '';

@@ -124,6 +124,18 @@ describe.skipIf(!apiUrl)('POST /api/uploads', () => {
     expect(animated.body.error.message).toBe("Animated images aren't supported. Send a still image.");
   });
 
+  it('a small-VM pixel limit refuses a larger photo with a clear 413, keeps nothing, and keeps serving', async () => {
+    const app = testApp(pool, apiUrl, GENEROUS, { storage: roomy(storage), env: { IMAGE_MAX_PIXELS: '2000000', IMAGE_CONCURRENCY: '1' } });
+    const u = await signIn(app, 'px');
+    const big = await upload(app, u, await solid(1500, 1400).jpeg().toBuffer(), 'wide.jpg', 'image/jpeg');
+    expect(big.status).toBe(413);
+    expect(big.body.error).toEqual({ code: 'too_large', message: 'That image has too many pixels. Photos can be up to 2 megapixels.' });
+    expect(await rowsOf(u)).toEqual([]);
+    expect(await stored()).toEqual([]);
+    expect((await upload(app, u, await solid(1000, 1000).jpeg().toBuffer(), 'fits.jpg', 'image/jpeg')).status).toBe(201);
+    expect((await request(app).get('/api/health')).status).toBe(200);
+  });
+
   it('cuts an oversized chunked upload off mid-stream: 413 long before the client finishes, nothing kept', async () => {
     const app = appWith();
     const u = await signIn(app, 'big');

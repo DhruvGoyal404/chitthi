@@ -19,6 +19,20 @@ const ENDPOINT_OVERRIDES = [
   'GITHUB_AUTH_URL', 'GITHUB_TOKEN_URL', 'GITHUB_API_URL',
 ] as const;
 
+/**
+ * How much image work the process may do at once. The defaults suit a development machine; a
+ * small production VM lowers them (IMAGE_* in the environment).
+ */
+export type ImageLimits = {
+  /** Images decoded at once; each can take a few hundred MB of RAM while decoding. */
+  concurrency: number;
+  /** Decompression-bomb guard: refuse anything that would decode to more pixels than this. */
+  maxInputPixels: number;
+  /** sharp's operation cache (process-wide). Off saves memory; nothing here reuses an input. */
+  cache: boolean;
+};
+export const IMAGE_DEFAULTS: ImageLimits = { concurrency: 2, maxInputPixels: 50_000_000, cache: true };
+
 const schema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']),
@@ -57,6 +71,11 @@ const schema = z
     // max(15 %, 2 GB) free). Refused in production, where the rule is fixed.
     MEDIA_MIN_FREE_PERCENT: z.preprocess((v) => (v === '' ? undefined : v), z.coerce.number().min(0).max(100).optional()),
     MEDIA_MIN_FREE_BYTES: z.preprocess((v) => (v === '' ? undefined : v), z.coerce.number().int().min(0).optional()),
+    // Image processing (sharp). A small VM lowers these; they can only be made stricter than the
+    // defaults, never looser. See docs/MEDIA.md.
+    IMAGE_CONCURRENCY: z.preprocess((v) => (v === '' ? undefined : v), z.coerce.number().int().min(1).max(IMAGE_DEFAULTS.concurrency).optional()),
+    IMAGE_MAX_PIXELS: z.preprocess((v) => (v === '' ? undefined : v), z.coerce.number().int().min(1_000_000).max(IMAGE_DEFAULTS.maxInputPixels).optional()),
+    IMAGE_CACHE: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['true', 'false']).optional()),
   })
   .superRefine((env, ctx) => {
     if (env.DEV_LOGIN && !devLoginAllowed(env.NODE_ENV)) {
@@ -129,6 +148,8 @@ export type Config = {
   mediaDir: string;
   /** The disk guard: refuse uploads below max(minFreeRatio of the disk, minFreeBytes) free. */
   diskGuard: { minFreeRatio: number; minFreeBytes: number };
+  /** How much image work runs at once, and the largest image accepted. */
+  images: ImageLimits;
 };
 
 export class ConfigError extends Error {
@@ -182,6 +203,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     diskGuard: {
       minFreeRatio: e.MEDIA_MIN_FREE_PERCENT === undefined ? DISK_GUARD_DEFAULTS.minFreeRatio : e.MEDIA_MIN_FREE_PERCENT / 100,
       minFreeBytes: e.MEDIA_MIN_FREE_BYTES ?? DISK_GUARD_DEFAULTS.minFreeBytes,
+    },
+    images: {
+      concurrency: e.IMAGE_CONCURRENCY ?? IMAGE_DEFAULTS.concurrency,
+      maxInputPixels: e.IMAGE_MAX_PIXELS ?? IMAGE_DEFAULTS.maxInputPixels,
+      cache: e.IMAGE_CACHE === undefined ? IMAGE_DEFAULTS.cache : e.IMAGE_CACHE === 'true',
     },
   };
 }

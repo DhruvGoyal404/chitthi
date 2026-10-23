@@ -18,11 +18,11 @@ export const GENEROUS: Limits = {
 };
 
 /** The real app, logged in to Postgres as chitthi_api, with dev sign-in on and its own rate-limit namespace. */
-export function testApp(pool: pg.Pool, apiUrl: string, limits: Limits = GENEROUS, extra: { storage?: Storage } = {}): Express {
-  const config = testConfig({ DATABASE_URL: apiUrl, DEV_LOGIN: 'true' });
+export function testApp(pool: pg.Pool, apiUrl: string, limits: Limits = GENEROUS, extra: { storage?: Storage; env?: Record<string, string> } = {}): Express {
+  const config = testConfig({ DATABASE_URL: apiUrl, DEV_LOGIN: 'true', ...extra.env });
   const { logger } = captureLogger(config);
   const rateLimits = createRateLimits(pool, logger, limits, `t${randomBytes(4).toString('hex')}:`);
-  return createApp({ config, logger, pool, rateLimits, ...extra });
+  return createApp({ config, logger, pool, rateLimits, ...(extra.storage && { storage: extra.storage }) });
 }
 
 export type Target = Express | string;

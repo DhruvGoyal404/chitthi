@@ -1,4 +1,5 @@
 import sharp, { type Metadata } from 'sharp';
+import { IMAGE_DEFAULTS, type ImageLimits } from '../config.js';
 
 export const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const IMAGE_MAX_EDGE = 2560;
@@ -6,10 +7,6 @@ export const IMAGE_MAX_EDGE = 2560;
 const FALLBACK_EDGE = 1600;
 export const THUMB_EDGE = 480;
 const PLACEHOLDER_EDGE = 16;
-/** Decompression-bomb guard: refuse anything that would decode to more pixels than this. */
-export const MAX_INPUT_PIXELS = 50_000_000;
-/** Images processed at once; each can take a few hundred MB of RAM while decoding. */
-const MAX_CONCURRENT = 2;
 
 export type ImageFormat = 'jpeg' | 'png' | 'webp' | 'gif';
 export type ImageRejection = 'animated' | 'unreadable' | 'too_many_pixels' | 'too_large' | 'mismatch';
@@ -32,20 +29,6 @@ export type ProcessedImage = {
   placeholder: string;
 };
 
-// A tiny semaphore: more uploads than this wait their turn instead of all decoding at once.
-let running = 0;
-const waiting: (() => void)[] = [];
-async function slot<T>(fn: () => Promise<T>): Promise<T> {
-  if (running >= MAX_CONCURRENT) await new Promise<void>((r) => waiting.push(r));
-  running++;
-  try {
-    return await fn();
-  } finally {
-    running--;
-    waiting.shift()?.();
-  }
-}
-
 const OUTPUT = {
   jpeg: { mime: 'image/jpeg', ext: 'jpg' },
   png: { mime: 'image/png', ext: 'png' },
@@ -53,16 +36,40 @@ const OUTPUT = {
   gif: { mime: 'image/png', ext: 'png' }, // static GIFs become PNG
 } as const;
 
-const input = (buf: Buffer) => sharp(buf, { limitInputPixels: MAX_INPUT_PIXELS, failOn: 'error' });
+export type ImageProcessor = {
+  /**
+   * Re-encodes an uploaded image, which is what makes it safe to show: the output is pixels only.
+   * EXIF orientation is applied, then every piece of metadata (EXIF, GPS, XMP, IPTC, comments) is
+   * dropped, as is anything appended after or embedded around the image data (polyglots). The
+   * format family is kept (static GIF → PNG); animated images are refused.
+   */
+  process: (buf: Buffer, sniffed: ImageFormat) => Promise<ProcessedImage>;
+  readonly limits: ImageLimits;
+  /** Images being decoded right now, and images waiting for a turn. */
+  load: () => { running: number; waiting: number };
+};
 
-/**
- * Re-encodes an uploaded image, which is what makes it safe to show: the output is pixels only.
- * EXIF orientation is applied, then every piece of metadata (EXIF, GPS, XMP, IPTC, comments) is
- * dropped, as is anything appended after or embedded around the image data (polyglots). The
- * format family is kept (static GIF → PNG); animated images are refused.
- */
-export function processImage(buf: Buffer, sniffed: ImageFormat): Promise<ProcessedImage> {
-  return slot(async () => {
+export function imageProcessor(limits: ImageLimits = IMAGE_DEFAULTS): ImageProcessor {
+  // The cache is sharp's, shared by the whole process: switching it off is never undone here.
+  if (!limits.cache) sharp.cache(false);
+
+  // A tiny semaphore: more uploads than this wait their turn instead of all decoding at once.
+  let running = 0;
+  const waiting: (() => void)[] = [];
+  async function slot<T>(fn: () => Promise<T>): Promise<T> {
+    if (running >= limits.concurrency) await new Promise<void>((r) => waiting.push(r));
+    running++;
+    try {
+      return await fn();
+    } finally {
+      running--;
+      waiting.shift()?.();
+    }
+  }
+
+  const input = (buf: Buffer) => sharp(buf, { limitInputPixels: limits.maxInputPixels, failOn: 'error' });
+
+  const run = (buf: Buffer, sniffed: ImageFormat) => slot(async (): Promise<ProcessedImage> => {
     let meta: Metadata;
     try {
       meta = await input(buf).metadata();
@@ -72,7 +79,7 @@ export function processImage(buf: Buffer, sniffed: ImageFormat): Promise<Process
     }
     if (meta.format !== sniffed) throw new ImageRejected('mismatch', `bytes say ${sniffed}, decoder says ${meta.format}`);
     if ((meta.pages ?? 1) > 1) throw new ImageRejected('animated');
-    if (meta.width * meta.height > MAX_INPUT_PIXELS) throw new ImageRejected('too_many_pixels');
+    if (meta.width * meta.height > limits.maxInputPixels) throw new ImageRejected('too_many_pixels');
 
     const out = OUTPUT[sniffed];
     const encode = async (edge: number) => {
@@ -103,4 +110,6 @@ export function processImage(buf: Buffer, sniffed: ImageFormat): Promise<Process
       placeholder: `data:image/webp;base64,${tiny.toString('base64')}`,
     };
   });
+
+  return { process: run, limits, load: () => ({ running, waiting: waiting.length }) };
 }

@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { crc32, deflateSync } from 'node:zlib';
 import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
-import { IMAGE_MAX_BYTES, ImageRejected, processImage } from '../src/media/image.js';
+import { IMAGE_DEFAULTS } from '../src/config.js';
+import { IMAGE_MAX_BYTES, imageProcessor, ImageRejected } from '../src/media/image.js';
 import { displayName } from '../src/media/names.js';
 import { NotTextError, sniff, TextGuard } from '../src/media/sniff.js';
 
@@ -47,6 +48,8 @@ const ANIMATED_GIF = Buffer.from(
   '21f90400' + '0a000000' + '2c00000000010001000002024c' + '0100' + '3b',
   'hex',
 );
+
+const processImage = imageProcessor().process;
 
 const solid = (width: number, height: number) => sharp({ create: { width, height, channels: 3, background: { r: 200, g: 80, b: 40 } } });
 
@@ -151,6 +154,35 @@ describe('image pipeline (sharp)', () => {
     const garbage = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), randomBytes(500)]);
     await expect(processImage(garbage, 'png')).rejects.toBeInstanceOf(ImageRejected);
     await expect(processImage(await solid(8, 8).png().toBuffer(), 'jpeg')).rejects.toMatchObject({ reason: 'mismatch' });
+  });
+
+  it('a lower pixel limit (a small VM) refuses a real image just over it, and takes one at it', async () => {
+    const small = imageProcessor({ ...IMAGE_DEFAULTS, maxInputPixels: 1_000_000 });
+    await expect(small.process(await solid(1001, 1000).png().toBuffer(), 'png')).rejects.toMatchObject({ reason: 'too_many_pixels' });
+    await expect(small.process(await solid(1000, 1000).jpeg().toBuffer(), 'jpeg')).resolves.toMatchObject({ width: 1000, height: 1000 });
+    await expect(small.process(pngClaiming(10_000, 10_000), 'png')).rejects.toMatchObject({ reason: 'too_many_pixels' });
+  });
+
+  it('decodes at most `concurrency` images at once; the rest wait their turn and still finish', async () => {
+    const one = imageProcessor({ ...IMAGE_DEFAULTS, concurrency: 1 });
+    const photo = await solid(800, 600).jpeg().toBuffer();
+    const jobs = [one.process(photo, 'jpeg'), one.process(photo, 'jpeg'), one.process(photo, 'jpeg')];
+    expect(one.load()).toEqual({ running: 1, waiting: 2 });
+    const seen: number[] = [];
+    const sample = setInterval(() => { seen.push(one.load().running); }, 1);
+    const done = await Promise.all(jobs).finally(() => { clearInterval(sample); });
+    expect(done.map((d) => d.width)).toEqual([800, 800, 800]);
+    expect(Math.max(...seen, 0)).toBeLessThanOrEqual(1);
+    expect(one.load()).toEqual({ running: 0, waiting: 0 });
+  });
+
+  it("IMAGE_CACHE=false switches sharp's process-wide cache off", () => {
+    try {
+      imageProcessor({ ...IMAGE_DEFAULTS, cache: false });
+      expect(sharp.cache()).toMatchObject({ memory: { max: 0 }, files: { max: 0 }, items: { max: 0 } });
+    } finally {
+      sharp.cache(true);
+    }
   });
 
   it('an image still over 10 MB after re-encoding is retried smaller, not refused', async () => {
