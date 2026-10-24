@@ -3,7 +3,8 @@
 # in as themselves (they must be Owner of the subscription):
 #
 #   git clone https://github.com/DhruvGoyal404/chitthi && cd chitthi
-#   bash deploy/azure/setup.sh infra alert_email=<address> [budget=<amount>] [subscription=<id>]
+#   bash deploy/azure/setup.sh infra alert_email=<address> [region=malaysiawest] [disks=premium|standard]
+#                                    [budget=<amount>] [subscription=<id>]
 #   bash deploy/azure/setup.sh secrets      # generates or asks for each missing Key Vault secret
 #   bash deploy/azure/setup.sh rotate name=<secret>   # a new value for one (docs/MAINTENANCE.md)
 #   bash deploy/azure/setup.sh check        # read-only: verifies everything below
@@ -24,7 +25,7 @@
 set -euo pipefail
 umask 077
 
-LOCATION=centralindia
+DEFAULT_REGION=malaysiawest # Azure for Students allows only a few regions (docs/MAINTENANCE.md, "Region")
 HOST_RG=apps-host
 VM=apps-vm
 VM_SIZE=Standard_B2ats_v2
@@ -33,8 +34,6 @@ SUBNET=apps-subnet
 NSG=apps-vm-nsg
 PIP=apps-vm-ip
 DATA_DISK=apps-vm-data
-DISK_SKU=Premium_LRS # P6 (64 GiB): the size the free-services allowance covers
-DISK_GB=64
 ADMIN_USER=azureops # required by Azure; it has no usable login (see create_vm)
 ACTION_GROUP=ops-email
 BUDGET_NAME=apps-host
@@ -74,6 +73,16 @@ for kv in "$@"; do
   arg[${kv%%=*}]=${kv#*=}
 done
 if ! command -v az >/dev/null || ! command -v jq >/dev/null; then die "run this in Azure Cloud Shell (Bash): it needs az and jq"; fi
+LOCATION=${arg[region]:-$DEFAULT_REGION}
+[[ $LOCATION =~ ^[a-z0-9]+$ ]] || die "region= must be an Azure region name, such as malaysiawest"
+# premium: two P6 (64 GiB Premium SSD), the disks the 12-month free allowance has listed.
+# standard: E4 (32 GiB) for the OS and E6 (64 GiB) for data, Standard SSD: never free, but less
+# than half of P6's price once nothing is free (docs/MAINTENANCE.md, "What it costs").
+case ${arg[disks]:-premium} in
+  premium) DISK_SKU=Premium_LRS OS_DISK_GB=64 DATA_DISK_GB=64 ;;
+  standard) DISK_SKU=StandardSSD_LRS OS_DISK_GB=32 DATA_DISK_GB=64 ;;
+  *) die "disks= must be premium or standard" ;;
+esac
 [[ -n ${arg[subscription]:-} ]] && q account set --subscription "${arg[subscription]}"
 SUB=$(v account show --query id) || die "not signed in: run az login"
 TENANT=$(v account show --query tenantId)
@@ -129,6 +138,7 @@ infra() {
   [[ -z $budget || $budget =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "budget must be a number"
   log "subscription: $SUB_NAME ($SUB), region $LOCATION"
   log "names: Key Vault $KV, storage account $SA"
+  preflight
   if [[ -t 0 ]]; then
     read -rp "Create or update these resources in this subscription? [y/N] " yn
     [[ $yn == [yY] ]] || die "stopped"
@@ -159,6 +169,65 @@ infra() {
   next_steps "$email"
 }
 
+# Read-only checks, before anything is created: each failure names its fix.
+preflight() {
+  local allowed sku restrictions zones rg loc n cutoff
+  log "preflight: region $LOCATION, $VM_SIZE, $DISK_SKU disks"
+
+  # 1. The subscription's allowed-locations policy (Azure for Students has one), from every policy
+  #    assignment that applies here, inherited ones included: each location-list parameter
+  #    (listOfAllowedLocations, for resources and for resource groups) must contain the region.
+  allowed=$(az policy assignment list --disable-scope-strict-match --only-show-errors --output json \
+    | jq -r '[.[] | (.parameters // {}) | to_entries[] | select(.key | test("location"; "i")) | .value.value
+              | select(type == "array") | map(ascii_downcase)]
+             | if length == 0 then "" else (reduce .[1:][] as $l (.[0]; map(select(. as $x | $l | index($x) != null)))) | join(" ") end') \
+    || die "could not read the subscription's policy assignments"
+  if [[ -n $allowed ]]; then
+    [[ " $allowed " == *" $LOCATION "* ]] \
+      || die "this subscription's policy doesn't allow region $LOCATION. Allowed: $allowed. Pass region=<one of them>"
+    log "policy: allowed regions are $allowed"
+  else
+    log "policy: no allowed-locations restriction found"
+  fi
+
+  # 2. The VM size: offered in the region, with no Location restriction for this subscription,
+  #    and able to use Premium SSD if the disks are premium. (A Zone restriction doesn't matter:
+  #    the VM is placed in no zone.)
+  sku=$(az vm list-skus --location "$LOCATION" --size "$VM_SIZE" --resource-type virtualMachines --all --only-show-errors --output json \
+    | jq -c --arg n "$VM_SIZE" '[.[] | select(.name == $n)] | first // empty')
+  [[ -n $sku ]] || die "$VM_SIZE is not offered in $LOCATION"
+  restrictions=$(jq -r '[.restrictions[]? | select(.type == "Location") | .reasonCode] | join(", ")' <<<"$sku")
+  [[ -z $restrictions ]] || die "$VM_SIZE is restricted in $LOCATION for this subscription ($restrictions)"
+  zones=$(jq -r '[.restrictions[]? | select(.type == "Zone") | .restrictionInfo.zones[]?] | join(",")' <<<"$sku")
+  [[ -z $zones ]] || log "note: $VM_SIZE is unavailable in zones $zones of $LOCATION; the VM uses no zone"
+  if [[ $DISK_SKU == Premium_LRS && $(jq -r '.capabilities[]? | select(.name == "PremiumIO") | .value' <<<"$sku") != True ]]; then
+    die "$VM_SIZE in $LOCATION can't use Premium SSD: pass disks=standard"
+  fi
+  log "$VM_SIZE: offered in $LOCATION, unrestricted"
+
+  # 3. Resource groups an earlier run left in another region. A group's region is only where its
+  #    metadata lives, but `az group create` refuses to "move" it, and mixed regions confuse. An
+  #    empty one is safe to delete; this never deletes anything itself.
+  for rg in "$HOST_RG" "$APP_RG"; do
+    loc=$(v group show --name "$rg" --query location 2>/dev/null || true)
+    [[ -z $loc || $loc == "$LOCATION" ]] && continue
+    n=$(v resource list --resource-group "$rg" --query 'length(@)')
+    [[ $n == 0 ]] && die "resource group $rg exists in $loc, empty (left by an earlier run). Delete it, then run this again: az group delete --name $rg --yes"
+    die "resource group $rg exists in $loc and holds $n resources; this won't build across regions (docs/MAINTENANCE.md, \"Region\")"
+  done
+
+  # 4. The VM image: the newest Ubuntu 24.04 published at least MIN_IMAGE_AGE_DAYS ago (versions
+  #    are 24.04.YYYYMMDDn), in this region.
+  if ! exists vm show -g "$HOST_RG" -n "$VM"; then
+    cutoff=$(date -u -d "-$MIN_IMAGE_AGE_DAYS days" +%Y%m%d)
+    IMAGE_VERSION=$(v vm image list --location "$LOCATION" --publisher Canonical --offer ubuntu-24_04-lts --sku server --all --query '[].version' \
+      | awk -F. -v cutoff="$cutoff" 'substr($3, 1, 8) <= cutoff' | sort -t. -k3,3n | tail -n 1)
+    [[ -n $IMAGE_VERSION ]] || die "no Ubuntu 24.04 image at least $MIN_IMAGE_AGE_DAYS days old in $LOCATION"
+    log "image: Canonical:ubuntu-24_04-lts:server:$IMAGE_VERSION"
+  fi
+  log "preflight passed"
+}
+
 network() {
   log "network: $VNET, $NSG (80 and 443 in, nothing else), static IPv4 $PIP"
   exists network vnet show -g "$HOST_RG" -n "$VNET" \
@@ -177,18 +246,12 @@ network() {
 
 create_vm() {
   exists disk show -g "$HOST_RG" -n "$DATA_DISK" \
-    || q disk create -g "$HOST_RG" -n "$DATA_DISK" -l "$LOCATION" --size-gb "$DISK_GB" --sku "$DISK_SKU"
+    || q disk create -g "$HOST_RG" -n "$DATA_DISK" -l "$LOCATION" --size-gb "$DATA_DISK_GB" --sku "$DISK_SKU"
   q lock create --name do-not-delete --lock-type CanNotDelete -g "$HOST_RG" --resource "$DATA_DISK" \
     --resource-type Microsoft.Compute/disks --notes "Chat history and media live here"
 
   if ! exists vm show -g "$HOST_RG" -n "$VM"; then
-    local cutoff version keydir
-    # The newest Ubuntu 24.04 image published at least MIN_IMAGE_AGE_DAYS ago (versions are
-    # 24.04.YYYYMMDDn).
-    cutoff=$(date -u -d "-$MIN_IMAGE_AGE_DAYS days" +%Y%m%d)
-    version=$(v vm image list --location "$LOCATION" --publisher Canonical --offer ubuntu-24_04-lts --sku server --all --query '[].version' \
-      | awk -F. -v cutoff="$cutoff" 'substr($3, 1, 8) <= cutoff' | sort -t. -k3,3n | tail -n 1)
-    [[ -n $version ]] || die "no Ubuntu 24.04 image at least $MIN_IMAGE_AGE_DAYS days old"
+    local keydir version=${IMAGE_VERSION:?preflight picks the image}
     log "creating $VM ($VM_SIZE, Canonical:ubuntu-24_04-lts:server:$version)"
     # Azure insists on an admin login. It gets a key whose private half is deleted right here,
     # and the host disables SSH anyway: access is Run Command only.
@@ -200,7 +263,7 @@ create_vm() {
       --admin-username "$ADMIN_USER" --authentication-type ssh --ssh-key-values "$(cat "$keydir/key.pub")" \
       --assign-identity '[system]' \
       --vnet-name "$VNET" --subnet "$SUBNET" --nsg "$NSG" --public-ip-address "$PIP" \
-      --os-disk-name "$VM-os" --os-disk-size-gb "$DISK_GB" --storage-sku "$DISK_SKU" \
+      --os-disk-name "$VM-os" --os-disk-size-gb "$OS_DISK_GB" --storage-sku "$DISK_SKU" \
       --os-disk-delete-option Delete --nic-delete-option Delete --patch-mode ImageDefault
     rm -rf "$keydir"
   fi
@@ -215,11 +278,11 @@ create_vm() {
 storage() {
   log "backup storage: $SA/$CONTAINER"
   if ! exists storage account show -g "$APP_RG" -n "$SA"; then
-    q storage account create -g "$APP_RG" -n "$SA" -l "$LOCATION" --sku Standard_LRS --kind StorageV2 --access-tier Hot \
+    q storage account create -g "$APP_RG" -n "$SA" -l "$LOCATION" --sku Standard_LRS --kind StorageV2 --access-tier Cool \
       --min-tls-version TLS1_2 --https-only true --allow-blob-public-access false --allow-shared-key-access false \
       --allow-cross-tenant-replication false
   else
-    q storage account update -g "$APP_RG" -n "$SA" --min-tls-version TLS1_2 --https-only true \
+    q storage account update -g "$APP_RG" -n "$SA" --access-tier Cool --min-tls-version TLS1_2 --https-only true \
       --allow-blob-public-access false --allow-shared-key-access false --allow-cross-tenant-replication false
   fi
   q storage account blob-service-properties update -g "$APP_RG" --account-name "$SA" \
@@ -457,8 +520,8 @@ check() { # [infra]: secrets not yet stored are reported, not counted, when call
   done
 
   # Backup storage
-  got=$(j storage account show -g "$APP_RG" -n "$SA" --query "{sharedKey: allowSharedKeyAccess, publicBlobs: allowBlobPublicAccess, tls: minimumTlsVersion, httpsOnly: enableHttpsTrafficOnly}")
-  expect "storage account: Entra sign-in only, no public blobs, TLS 1.2, HTTPS" "$got" '{"httpsOnly":true,"publicBlobs":false,"sharedKey":false,"tls":"TLS1_2"}'
+  got=$(j storage account show -g "$APP_RG" -n "$SA" --query "{sharedKey: allowSharedKeyAccess, publicBlobs: allowBlobPublicAccess, tls: minimumTlsVersion, httpsOnly: enableHttpsTrafficOnly, tier: accessTier}")
+  expect "storage account: Entra sign-in only, no public blobs, TLS 1.2, HTTPS, Cool tier" "$got" '{"httpsOnly":true,"publicBlobs":false,"sharedKey":false,"tier":"Cool","tls":"TLS1_2"}'
   got=$(j storage account blob-service-properties show -g "$APP_RG" --account-name "$SA" \
     --query "{softDelete: deleteRetentionPolicy.enabled, days: deleteRetentionPolicy.days, versioning: isVersioningEnabled || \`false\`}")
   expect "blob soft delete for $SOFT_DELETE_DAYS days, no versioning" "$got" "{\"days\":$SOFT_DELETE_DAYS,\"softDelete\":true,\"versioning\":false}"

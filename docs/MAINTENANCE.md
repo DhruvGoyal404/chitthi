@@ -15,7 +15,7 @@ Every command here runs from Azure Cloud Shell, in a clone of this repo.
 
 ## Layout
 
-- **VM:** Azure B2ats v2 (2 vCPU, 1 GiB), Ubuntu 24.04, Central India.
+- **VM:** Azure B2ats v2 (2 vCPU, 1 GiB), Ubuntu 24.04, Malaysia West (`malaysiawest`; see "Region").
 - **`deploy/edge`:** the shared Caddy (compose project `edge`, host network, ports 80 and 443).
   - `Caddyfile` holds the global options and a loopback-only liveness site on 127.0.0.1:2080.
   - `sites/<app>.caddy` holds one file per app.
@@ -46,9 +46,9 @@ Every command here runs from Azure Cloud Shell, in a clone of this repo.
 
 | What | Name | Where |
 |---|---|---|
-| VM | `apps-vm` (B2ats v2, Ubuntu 24.04) | Azure, resource group `apps-host`, Central India |
+| VM | `apps-vm` (B2ats v2, Ubuntu 24.04) | Azure, resource group `apps-host`, Malaysia West |
 | Public IPv4 (static) | `apps-vm-ip` | `apps-host`. DNS: `chitthi.dhruvgoyal.tech` A record |
-| Data disk | `apps-vm-data` (64 GiB P6, LUN 0, delete lock) → `/data` | `apps-host` |
+| Data disk | `apps-vm-data` (64 GiB: P6 Premium SSD, or E6 Standard SSD with `disks=standard`; LUN 0; delete lock) → `/data` | `apps-host` |
 | Network security group | `apps-vm-nsg` (TCP 80 and 443 in) | `apps-host` |
 | Alerts and budget | `ops-email`, 3 metric alerts, 2 activity log alerts, budget `apps-host` | `apps-host` and the subscription |
 | Backup storage | `chitthibk<6 hex>`, container `backups` | Azure, resource group `chitthi` |
@@ -86,10 +86,10 @@ replaces a stored secret.
 |---|---|---|
 | `apps-host` (shared by both apps) | VM `apps-vm` | B2ats v2, Ubuntu 24.04 (the newest image at least 14 days old), Trusted Launch, system identity. Azure requires an admin login, so it gets a key whose private half is deleted on the spot: there is no SSH, by design. Boot diagnostics are on, for the Serial Console. |
 | | Network | `apps-vm-nsg` allows TCP 80 and 443 from the Internet, nothing else. `apps-vm-ip` is a static Standard IPv4. No IPv6. |
-| | Disks | OS and data disk `apps-vm-data` are 64 GiB Premium SSD (P6). The data disk sits at LUN 0, with a delete lock. |
+| | Disks | `disks=premium` (default): OS and data disk `apps-vm-data` are both 64 GiB Premium SSD (P6). `disks=standard`: a 32 GiB E4 OS disk and a 64 GiB E6 data disk (Standard SSD). See "What it costs". The data disk sits at LUN 0, with a delete lock. |
 | | Alerts | Action group `ops-email` sends to your address. Metric alerts: the VM unavailable, under 100 MiB available memory for 15 minutes, CPU credits under 30. Activity log alerts: the VM's resource health, and any role assignment written in the subscription. |
 | | Budget | `apps-host`, monthly, for the whole subscription. Default ₹700 (pass `budget=` if the billing currency isn't INR). Email at 50, 80 and 100 % actual, and at 100 % forecast. |
-| `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS. Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
+| `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS, Cool tier (written nightly, read monthly; nothing is deleted before the tier's 30-day minimum, since every expiry is at 35 days or later). Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
 | | Key Vault `chitthi-kv-<6 hex>` | Standard, RBAC, purge protection, 90-day soft delete, delete lock. |
 | | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404/chitthi:environment:production`. |
 
@@ -132,7 +132,15 @@ of this repo, unless a step says GitHub, a browser or another service.
    ```
    git clone https://github.com/DhruvGoyal404/chitthi && cd chitthi && git checkout <commit>
    ```
-7. **Create the Azure resources:** `bash deploy/azure/setup.sh infra alert_email=<you@…>`. Answer `y`. It ends with its checks (secrets still to come are listed as "todo") and prints your IP and the GitHub values. Keep that output for steps 10 and 20.
+7. **Create the Azure resources.**
+   - First, Portal → search "Free services": check whether this subscription's free services include the B2ats v2 hours and the P6 managed disks. If the P6 disks aren't listed, add `disks=standard` below ("What it costs" explains why).
+   - If an earlier run left empty resource groups in another region, the preflight stops and prints the `az group delete` command to run first.
+   - Then run:
+     ```
+     bash deploy/azure/setup.sh infra alert_email=<you@…> region=malaysiawest
+     ```
+   - Its preflight checks the region against your subscription's allowed-locations policy, and checks that B2ats v2 is offered there unrestricted. Then answer `y`.
+   - It ends with its checks (secrets still to come are listed as "todo") and prints your IP and the GitHub values. Keep that output for steps 10 and 20.
 8. **Confirm Azure's alert email:** an email from Azure Monitor saying you were added to the action group `ops-email`. If it went to spam, mark it "not spam".
 9. **DNS:** at your DNS provider, add an A record `chitthi.dhruvgoyal.tech` pointing to the IP from step 7. No AAAA record.
 10. **Google OAuth client:**
@@ -192,7 +200,7 @@ That's go-live. From now on, every push to `main` that passes CI and changes mor
 - the deploy identity's role is enough for managed Run Command (create, show, delete);
 - the protected parameter arrives as `CHITTHI_GITHUB_TOKEN` (the wrapper exits 97 if it doesn't);
 - budgets work on this subscription type (the script fails loudly if they don't);
-- B2ats v2 is offered in Central India to this subscription.
+- the preflight's reading of the allowed-locations policy matches what Azure enforces (if it misses a policy, creation fails at the first resource, as before);
 
 `setup.sh check` and the selftest are the evidence.
 
@@ -237,18 +245,59 @@ What protects deploys now:
 - The deploy's `gate` job deploys only if CI's `images` job passed for that commit.
 - On `main`, CI runs are no longer cancelled by a newer push, so a code push followed quickly by a docs push still deploys.
 
+### Region
+
+**Malaysia West** (`malaysiawest`), decided 2026-10-24.
+- **Why:** Azure for Students subscriptions carry an allowed-locations policy. This one allows `eastasia`, `koreacentral`, `uaenorth`, `indonesiacentral` and `malaysiawest`, and not `centralindia`. The first attempt failed with `RequestDisallowedByAzure`.
+  - B2ats v2 isn't offered in `uaenorth`.
+  - In `malaysiawest` it's offered with no restrictions.
+- **The preflight:** `setup.sh infra region=…` (default `malaysiawest`) checks, before it asks to create anything:
+  - every location list in the subscription's policy assignments, inherited ones included;
+  - that the VM size is offered in the region without a Location restriction, and supports Premium SSD when `disks=premium`;
+  - that no resource group from an earlier run sits in another region;
+  - that a suitable Ubuntu image exists there.
+- **A resource group left in another region:** delete it and let `setup.sh` recreate it, rather than reuse it.
+  - A group's region only says where its metadata lives, so reuse would work in principle.
+  - But `az group create` refuses a group that exists in another region, so reuse would need special code in every re-run.
+  - Mixing regions also makes the inventory and any data-residency answer harder.
+  - An empty group holds nothing to lose. The preflight refuses a non-empty one, and never deletes anything itself.
+- **Latency:** chat traffic from India now crosses to Kuala Lumpur. Expect roughly 60–100 ms round trip from north India, against roughly 25–45 ms to Central India. That's an estimate: measure it after go-live with `curl -o /dev/null -sw '%{time_connect}\n' https://chitthi.dhruvgoyal.tech/api/health`. A chat app tolerates this well: messages carry their own sequence numbers, and the UI updates optimistically.
+- **Data location:** messages, files and the primary backups live in Malaysia West, and the second backup copy in Cloudflare R2 (Asia-Pacific). Keep any privacy text that names a data location in step.
+
 ### What it costs
 
-Monthly list prices, approximate; Cost Management has the real figures a day after anything changes:
+Monthly, at Azure's retail prices for `malaysiawest` in INR (Azure Retail Prices API, 2026-10-24; 730 hours a month). Cost Management shows the real figures a day after anything changes.
 
-| Item | Cost |
-|---|---|
-| VM (B2ats v2) and two P6 disks | Inside Azure's 12-month free-services allowance (750 VM hours, two P6 disks) if the subscription has it. Otherwise roughly ₹600 for the VM and ₹800 per P6. After 12 months, move the disks to Standard SSD. |
-| Static public IPv4 | About ₹300 (USD 0.005 an hour). |
-| Key Vault | Standard tier: USD 0.03 per 10,000 secret operations, and secrets cost nothing to store. A deploy reads 6 secrets and a nightly backup 5, so roughly 300 operations a month: effectively zero. |
-| Backup storage | A few GB of LRS blobs plus transactions: a few rupees. |
-| Alerts | Three metric alerts at about USD 0.10 each. Activity log alerts and the budget are free. |
-| Outbound traffic | The first 100 GB a month are free. |
+| Item | Unit price | Monthly |
+|---|---|---|
+| VM, B2ats v2 (Linux) | ₹1.0271 an hour | ₹750 |
+| OS + data disks, `disks=premium`: two P6 (64 GiB Premium SSD) | ₹979.76 each | ₹1,960 |
+| OS + data disks, `disks=standard`: E4 (32 GiB) + E6 (64 GiB) Standard SSD | ₹230.37 + ₹460.75 | ₹691 (plus pennies of I/O) |
+| Static public IPv4 (Standard) | ₹0.4799 an hour | ₹350 |
+| Backup storage, Blob Cool LRS, about 5 GB | ₹0.9599 per GB, writes ₹9.60 per 10,000 | about ₹6 |
+| Key Vault, about 300 secret reads | ₹2.88 per 10,000 operations | under ₹1 |
+| Outbound traffic | First 100 GB free, then ₹10.56 per GB | ₹0 at this app's scale |
+| Metric alerts (3) | First 10 monitored series free | ₹0 |
+
+**Totals, depending on what Azure's free allowance covers:**
+
+| Case | `disks=premium` | `disks=standard` |
+|---|---|---|
+| A. VM hours and both P6 disks free (the 12-month allowance, as Microsoft has listed it) | **≈ ₹356** | ≈ ₹1,047 |
+| B. VM hours free, disks not | ≈ ₹2,316 | **≈ ₹1,047** |
+| C. Nothing free (after the 12 months) | ≈ ₹3,066 | **≈ ₹1,797** |
+
+**What Microsoft's pages say:**
+- The Students page lists "750 hours each of B1s, B2pts v2 … and B2ats v2" for 12 months, for new Azure customers only. Neither it nor the free-account FAQ limits those hours to a region.
+- They no longer mention the two free P6 disks, which older versions of the free-services list included.
+- Portal → "Free services" shows what this subscription actually gets. Check it before step 7.
+
+**Against the ₹700 budget and the ₹9,599 credit (valid until October 2027):**
+- **Case A fits:** about ₹356 a month, ₹4,300 over 12 months. Choose `disks=premium`.
+- **If the disks aren't free, choose `disks=standard`:** about ₹1,047 a month is **over ₹700**, and the credit lasts about 9 months.
+- **After the 12 free months, nothing fits ₹700:** the VM and the IPv4 address alone are about ₹1,100 a month, and with standard disks about ₹1,800. Before then, the budget, the VM size or the hosting needs another decision.
+
+Changing the disk type later means stopping the VM: `az vm deallocate`, `az disk update --sku …`, then start it again. A few minutes of downtime.
 
 **Azure for Students** stops the subscription when the credit runs out, and the site goes down
 with it. The budget alerts are the early warning.

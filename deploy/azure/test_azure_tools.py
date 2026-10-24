@@ -117,7 +117,7 @@ FAKE_AZ = r"""#!/usr/bin/env bash
 state=${FAKE_AZ_STATE:?}
 { printf '%s\n' "$@"; echo ---; } >> "$state/args.log"
 case "$1 $2 ${3:-}" in
-  "vm show "*) echo centralindia ;;
+  "vm show "*) echo malaysiawest ;;
   "vm run-command create")
     shift 3
     script= penv=()
