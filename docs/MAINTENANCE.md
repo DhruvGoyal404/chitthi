@@ -89,7 +89,7 @@ replaces a stored secret.
 | | Disks | `disks=premium` (default): OS and data disk `apps-vm-data` are both 64 GiB Premium SSD (P6). `disks=standard`: a 32 GiB E4 OS disk and a 64 GiB E6 data disk (Standard SSD). See "What it costs". The data disk sits at LUN 0, with a delete lock. |
 | | Alerts | Action group `ops-email` sends to your address. Metric alerts: the VM unavailable, under 100 MiB available memory for 15 minutes, CPU credits under 30. Activity log alerts: the VM's resource health, and any role assignment written in the subscription. |
 | | Budget | `apps-host`, monthly, for the whole subscription. Default ₹700 (pass `budget=` if the billing currency isn't INR). Email at 50, 80 and 100 % actual, and at 100 % forecast. |
-| `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS, Cool tier (written nightly, read monthly; nothing is deleted before the tier's 30-day minimum, since every expiry is at 35 days or later). Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
+| `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS, Hot tier (switched back from Cool on 2026-10-24: at a few GB the difference is a few rupees, and Hot has no early-deletion or retrieval charges). Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
 | | Key Vault `chitthi-kv-<6 hex>` | Standard, RBAC, purge protection, 90-day soft delete, delete lock. |
 | | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404/chitthi:environment:production`. |
 
@@ -167,7 +167,7 @@ of this repo, unless a step says GitHub, a browser or another service.
 16. **Keep the backup private key outside Azure:**
     - Show it once with `az keyvault secret show --vault-name <KEY_VAULT> -n chitthi-backup-age-identity --query value -o tsv`, save it in your password manager, then `clear`.
     - Without it, no backup can be read if the Key Vault is ever lost.
-17. **Check everything:** `bash deploy/azure/setup.sh check` must end with "all checks passed".
+17. **Check everything:** `bash deploy/azure/setup.sh check` must end with "all checks passed". Any time, `bash deploy/azure/setup.sh summary` prints the same checks read-only, with missing secrets as "todo", then the IP and the GitHub values.
 18. **Set up the host:** `bash deploy/azure/run-on-vm.sh deploy/host/bootstrap.sh`. It ends with its own checks and `free -m`. Note the "used" figure: it's the real OS row of the memory budget.
 19. **Start the edge,** once `nslookup chitthi.dhruvgoyal.tech` returns your IP: `bash deploy/azure/run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=<you@…>`.
 20. **GitHub environment values:** Settings → Environments → production. Use the values from step 7.
@@ -269,13 +269,13 @@ What protects deploys now:
 ### The VM image
 
 The VM is created from a pinned image URN, like a container digest. The default is
-`Canonical:ubuntu-24_04-lts:server:24.04.202610220`, set in `setup.sh` (`DEFAULT_IMAGE`); pass `image=<URN>` to override it.
+`Canonical:ubuntu-24_04-lts:server:24.04.202610210`, set in `setup.sh` (`DEFAULT_IMAGE`); pass `image=<URN>` to override it.
 
 - **The pin is per region.** Canonical's image versions reach regions at different times, and the version list can disagree with the region.
   - The second go-live attempt chose `24.04.202610090` from `az vm image list`, which `az vm image show` couldn't find in `malaysiawest`.
   - So the preflight checks the exact URN with `az vm image show --location <region>`, the lookup VM creation itself does.
   - If the image is missing, the preflight stops before the prompt and prints the region's three newest versions.
-- **Under 14 days old is allowed, with a note.** `202610220` was published 2026-10-22, younger than the 14-day supply-chain rule. Every version present in `malaysiawest` on 2026-10-24 was, and the only older candidate wasn't actually there. The preflight reports the age and goes ahead, because the pin is a deliberate choice. Security updates arrive through unattended-upgrades from the first boot either way.
+- **Under 14 days old is allowed, with a note.** `202610210` was published 2026-10-21, younger than the 14-day supply-chain rule. Every version present in `malaysiawest` on 2026-10-24 was, and the only older candidate wasn't actually there. The preflight reports the age and goes ahead, because the pin is a deliberate choice. Security updates arrive through unattended-upgrades from the first boot either way.
 - **The pin only matters when the VM is created.** Afterwards the OS is updated in place ("Updates"). Bump it only before building a VM (a rebuild, a new LTS), and choose a version at least 14 days old when the region has one:
   ```
   az vm image list --location malaysiawest --publisher Canonical --offer ubuntu-24_04-lts --sku server --all --query '[].urn' -o tsv | sort | tail -n 5
@@ -293,7 +293,7 @@ Monthly, at Azure's retail prices for `malaysiawest` in INR (Azure Retail Prices
 | OS + data disks, `disks=premium`: two P6 (64 GiB Premium SSD) | ₹979.76 each | ₹1,960 |
 | OS + data disks, `disks=standard`: E4 (32 GiB) + E6 (64 GiB) Standard SSD | ₹230.37 + ₹460.75 | ₹691 (plus pennies of I/O) |
 | Static public IPv4 (Standard) | ₹0.4799 an hour | ₹350 |
-| Backup storage, Blob Cool LRS, about 5 GB | ₹0.9599 per GB, writes ₹9.60 per 10,000 | about ₹6 |
+| Backup storage, Blob Hot LRS, about 5 GB | ₹1.7278 per GB, writes ₹4.32 per 10,000 | about ₹9 |
 | Key Vault, about 300 secret reads | ₹2.88 per 10,000 operations | under ₹1 |
 | Outbound traffic | First 100 GB free, then ₹10.56 per GB | ₹0 at this app's scale |
 | Metric alerts (3) | First 10 monitored series free | ₹0 |
@@ -302,9 +302,9 @@ Monthly, at Azure's retail prices for `malaysiawest` in INR (Azure Retail Prices
 
 | Case | `disks=premium` | `disks=standard` |
 |---|---|---|
-| A. VM hours and both P6 disks free (the 12-month allowance, as Microsoft has listed it) | **≈ ₹356** | ≈ ₹1,047 |
-| B. VM hours free, disks not | ≈ ₹2,316 | **≈ ₹1,047** |
-| C. Nothing free (after the 12 months) | ≈ ₹3,066 | **≈ ₹1,797** |
+| A. VM hours and both P6 disks free (the 12-month allowance, as Microsoft has listed it) | **≈ ₹359** | ≈ ₹1,050 |
+| B. VM hours free, disks not | ≈ ₹2,319 | **≈ ₹1,050** |
+| C. Nothing free (after the 12 months) | ≈ ₹3,069 | **≈ ₹1,800** |
 
 **What Microsoft's pages say:**
 - The Students page lists "750 hours each of B1s, B2pts v2 … and B2ats v2" for 12 months, for new Azure customers only. Neither it nor the free-account FAQ limits those hours to a region.
@@ -312,8 +312,8 @@ Monthly, at Azure's retail prices for `malaysiawest` in INR (Azure Retail Prices
 - Portal → "Free services" shows what this subscription actually gets. Check it before step 7.
 
 **Against the ₹700 budget and the ₹9,599 credit (valid until October 2027):**
-- **Case A fits:** about ₹356 a month, ₹4,300 over 12 months. Choose `disks=premium`.
-- **If the disks aren't free, choose `disks=standard`:** about ₹1,047 a month is **over ₹700**, and the credit lasts about 9 months.
+- **Case A fits:** about ₹359 a month, ₹4,300 over 12 months. Choose `disks=premium`.
+- **If the disks aren't free, choose `disks=standard`:** about ₹1,050 a month is **over ₹700**, and the credit lasts about 9 months.
 - **After the 12 free months, nothing fits ₹700:** the VM and the IPv4 address alone are about ₹1,100 a month, and with standard disks about ₹1,800. Before then, the budget, the VM size or the hosting needs another decision.
 
 Changing the disk type later means stopping the VM: `az vm deallocate`, `az disk update --sku …`, then start it again. A few minutes of downtime.

@@ -8,6 +8,7 @@
 #   bash deploy/azure/setup.sh secrets      # generates or asks for each missing Key Vault secret
 #   bash deploy/azure/setup.sh rotate name=<secret>   # a new value for one (docs/MAINTENANCE.md)
 #   bash deploy/azure/setup.sh check        # read-only: verifies everything below
+#   bash deploy/azure/setup.sh summary      # read-only: the checks (secrets as todo), the IP and the GitHub values
 #
 # Re-runnable. Each step creates what's missing and brings settings back to what's written here.
 # It never deletes anything, and never replaces a secret that exists.
@@ -48,8 +49,8 @@ KEEP_DAYS=35
 SOFT_DELETE_DAYS=14
 MIN_IMAGE_AGE_DAYS=14 # the supply-chain rule: a younger pinned image is reported (preflight)
 # The VM image, pinned like a container digest. Versions roll out per region: this one is present
-# in malaysiawest (checked 2026-10-24). Override with image=<publisher:offer:sku:version>.
-DEFAULT_IMAGE=Canonical:ubuntu-24_04-lts:server:24.04.202610220
+# in malaysiawest (24.04.202610210 and 202610220 were, checked 2026-10-24). Override with image=<publisher:offer:sku:version>.
+DEFAULT_IMAGE=Canonical:ubuntu-24_04-lts:server:24.04.202610210
 METRIC_ALERTS=(vm-unavailable vm-low-memory vm-cpu-credits-low)
 ACTIVITY_ALERTS=(vm-resource-health role-assignment-changed)
 SECRETS=(
@@ -64,7 +65,18 @@ log() { echo "setup: $*"; }
 die() { echo "setup: FAILED: $*" >&2; exit 1; }
 q() { az "$@" --only-show-errors --output none; }      # run, no output
 v() { az "$@" --only-show-errors --output tsv; }       # one value
-j() { az "$@" --only-show-errors --output json | jq -cS .; } # compact JSON, sorted keys
+# JSON from az, checked before jq reads it: a failure names the command and shows what came
+# back, never a bare "jq: parse error". (Don't pass --output to v or q: their own wins, being last.)
+json() {
+  local out
+  out=$(az "$@" --only-show-errors --output json) || return 1
+  if ! jq -e . >/dev/null 2>&1 <<<"$out"; then
+    echo "setup: 'az $1 $2 ${3:-}' did not return JSON: ${out:0:200}" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+j() { json "$@" | jq -cS .; } # compact JSON, sorted keys
 exists() { az "$@" --only-show-errors --output none >/dev/null 2>&1; }
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -295,11 +307,11 @@ create_vm() {
 storage() {
   log "backup storage: $SA/$CONTAINER"
   if ! exists storage account show -g "$APP_RG" -n "$SA"; then
-    q storage account create -g "$APP_RG" -n "$SA" -l "$LOCATION" --sku Standard_LRS --kind StorageV2 --access-tier Cool \
+    q storage account create -g "$APP_RG" -n "$SA" -l "$LOCATION" --sku Standard_LRS --kind StorageV2 --access-tier Hot \
       --min-tls-version TLS1_2 --https-only true --allow-blob-public-access false --allow-shared-key-access false \
       --allow-cross-tenant-replication false
   else
-    q storage account update -g "$APP_RG" -n "$SA" --access-tier Cool --min-tls-version TLS1_2 --https-only true \
+    q storage account update -g "$APP_RG" -n "$SA" --access-tier Hot --min-tls-version TLS1_2 --https-only true \
       --allow-blob-public-access false --allow-shared-key-access false --allow-cross-tenant-replication false
   fi
   q storage account blob-service-properties update -g "$APP_RG" --account-name "$SA" \
@@ -389,6 +401,7 @@ set_budget() { # <email> [amount]
   log "budget: $amount ${currency:-(billing currency)} a month, alerts at 50, 80 and 100 % (and 100 % forecast)"
   url="https://management.azure.com$SUB_SCOPE/providers/Microsoft.Consumption/budgets/$BUDGET_NAME?api-version=2023-05-01"
   existing=$(az rest --method get --url "$url" --only-show-errors --output json 2>/dev/null || echo null)
+  jq -e . >/dev/null 2>&1 <<<"$existing" || existing=null # no budget yet, or not JSON: start fresh
   # An existing budget keeps its start date (Azure refuses to move it) and passes its eTag back.
   body=$(jq -n --argjson amount "$amount" --arg email "$1" --argjson old "$existing" \
     --arg start "$(date -u +%Y-%m-01)T00:00:00Z" --arg end "$(date -u -d "$(date -u +%Y-%m-01) +5 years" +%Y-%m-01)T00:00:00Z" '
@@ -513,7 +526,7 @@ rotate() { # <name>: a new value for one secret (docs/MAINTENANCE.md, "Secret ro
 }
 
 # ==================================================================================================
-check() { # [infra]: secrets not yet stored are reported, not counted, when called from infra
+check() { # [infra|summary]: secrets not yet stored are reported as todo, not counted
   local fails=0 todo=0 got vm_pid deploy_pid name names
   ok() { echo "ok   $*"; }
   bad() { echo "FAIL $*"; fails=$((fails + 1)); }
@@ -538,7 +551,7 @@ check() { # [infra]: secrets not yet stored are reported, not counted, when call
 
   # Backup storage
   got=$(j storage account show -g "$APP_RG" -n "$SA" --query "{sharedKey: allowSharedKeyAccess, publicBlobs: allowBlobPublicAccess, tls: minimumTlsVersion, httpsOnly: enableHttpsTrafficOnly, tier: accessTier}")
-  expect "storage account: Entra sign-in only, no public blobs, TLS 1.2, HTTPS, Cool tier" "$got" '{"httpsOnly":true,"publicBlobs":false,"sharedKey":false,"tier":"Cool","tls":"TLS1_2"}'
+  expect "storage account: Entra sign-in only, no public blobs, TLS 1.2, HTTPS, Hot tier" "$got" '{"httpsOnly":true,"publicBlobs":false,"sharedKey":false,"tier":"Hot","tls":"TLS1_2"}'
   got=$(j storage account blob-service-properties show -g "$APP_RG" --account-name "$SA" \
     --query "{softDelete: deleteRetentionPolicy.enabled, days: deleteRetentionPolicy.days, versioning: isVersioningEnabled || \`false\`}")
   expect "blob soft delete for $SOFT_DELETE_DAYS days, no versioning" "$got" "{\"days\":$SOFT_DELETE_DAYS,\"softDelete\":true,\"versioning\":false}"
@@ -557,11 +570,11 @@ check() { # [infra]: secrets not yet stored are reported, not counted, when call
   expect "role '$RUNCMD_ROLE' grants Run Command only" "$got" \
     '{"actions":["Microsoft.Compute/virtualMachines/read","Microsoft.Compute/virtualMachines/runCommands/delete","Microsoft.Compute/virtualMachines/runCommands/read","Microsoft.Compute/virtualMachines/runCommands/write"],"data":[]}'
   vm_pid=$(v vm show -g "$HOST_RG" -n "$VM" --query identity.principalId)
-  got=$(v role assignment list --all --query "sort([?principalId=='$vm_pid'].join('@', [roleDefinitionName, scope]))" --output json | jq -r 'join(" ")' | lower)
+  got=$(json role assignment list --all --query "sort([?principalId=='$vm_pid'].join('@', [roleDefinitionName, scope]))" | jq -r 'join(" ")' | lower)
   expect "the VM's identity holds exactly: create-only on $CONTAINER, Secrets User on $KV" "$got" \
     "$(echo "$BACKUP_ROLE@$CONTAINER_ID Key Vault Secrets User@$KV_ID" | lower)"
   deploy_pid=$(v identity show -g "$APP_RG" -n "$DEPLOY_ID" --query principalId)
-  got=$(v role assignment list --all --query "[?principalId=='$deploy_pid'].join('@', [roleDefinitionName, scope])" --output json | jq -r 'join(" ")' | lower)
+  got=$(json role assignment list --all --query "[?principalId=='$deploy_pid'].join('@', [roleDefinitionName, scope])" | jq -r 'join(" ")' | lower)
   expect "the deploy identity holds exactly: Run Command on $VM" "$got" "$(echo "$RUNCMD_ROLE@$VM_ID" | lower)"
   got=$(j identity federated-credential list -g "$APP_RG" --identity-name "$DEPLOY_ID" --query "[].{issuer: issuer, subject: subject, audiences: audiences}")
   expect "the deploy identity trusts only $GITHUB_REPO's '$GITHUB_ENVIRONMENT' environment" "$got" \
@@ -573,13 +586,13 @@ check() { # [infra]: secrets not yet stored are reported, not counted, when call
   if names=$(v keyvault secret list --vault-name "$KV" --query '[].name' 2>/dev/null); then
     for name in "${SECRETS[@]}"; do
       if grep -qx "$name" <<<"$names"; then :
-      elif [[ ${1:-} == infra ]]; then todo=$((todo + 1))
+      elif [[ ${1:-} == infra || ${1:-} == summary ]]; then todo=$((todo + 1))
       else bad "secret $name is missing (setup.sh secrets)"
       fi
     done
     if [[ $todo -gt 0 ]]; then echo "todo $todo secrets to store: bash deploy/azure/setup.sh secrets"; else ok "all ${#SECRETS[@]} secrets are stored"; fi
   else
-    if [[ ${1:-} == infra ]]; then echo "todo secrets: your Key Vault access is still replicating; run setup.sh secrets in a few minutes"
+    if [[ ${1:-} == infra || ${1:-} == summary ]]; then echo "todo secrets: your Key Vault access is still replicating; run setup.sh secrets in a few minutes"
     else bad "can't list secrets in $KV"; fi
   fi
 
@@ -602,10 +615,20 @@ check() { # [infra]: secrets not yet stored are reported, not counted, when call
   log "all checks passed"
 }
 
+# Read-only: every check (missing secrets shown as todo), then the IP and the GitHub values, even
+# when some checks fail. Exits non-zero if any did.
+summary() {
+  local rc=0 email
+  ( check summary ) || rc=$?
+  email=$(v monitor action-group show -g "$HOST_RG" -n "$ACTION_GROUP" --query "emailReceivers[0].emailAddress" 2>/dev/null || true)
+  next_steps "${email:-<you@…>}"
+  return "$rc"
+}
+
 next_steps() { # <email>
   local ip client_id
-  ip=$(v network public-ip show -g "$HOST_RG" -n "$PIP" --query ipAddress)
-  client_id=$(v identity show -g "$APP_RG" -n "$DEPLOY_ID" --query clientId)
+  ip=$(v network public-ip show -g "$HOST_RG" -n "$PIP" --query ipAddress 2>/dev/null || echo "(no public IP yet)")
+  client_id=$(v identity show -g "$APP_RG" -n "$DEPLOY_ID" --query clientId 2>/dev/null || echo "(no deploy identity yet)")
   cat <<EOF
 
 Next (docs/MAINTENANCE.md, "Azure setup"):
@@ -631,5 +654,6 @@ case $cmd in
   secrets) secrets ;;
   rotate) rotate ;;
   check) check ;;
-  *) die "usage: setup.sh infra alert_email=<address> [budget=<amount>] [subscription=<id>] | secrets | rotate name=<secret> | check" ;;
+  summary) summary ;;
+  *) die "usage: setup.sh infra alert_email=<address> [region=] [disks=] [image=] [budget=<amount>] [subscription=<id>] | secrets | rotate name=<secret> | check | summary" ;;
 esac
