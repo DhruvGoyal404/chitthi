@@ -1,0 +1,6 @@
+# Chitthi: the public pages may be indexed; the API and everything behind sign-in are not pages.
+User-agent: *
+Disallow: /api/
+Allow: /
+
+Sitemap: https://chitthi.dhruvgoyal.tech/sitemap.xml

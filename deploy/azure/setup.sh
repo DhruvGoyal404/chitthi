@@ -371,7 +371,7 @@ alerts() { # <email>
     --condition "category=ResourceHealth and resourceId=$VM_ID" --action-group "$AG_ID" \
     --description "Azure reports the VM degraded or unavailable."
   q monitor activity-log alert create -g "$HOST_RG" -n role-assignment-changed --scope "$SUB_SCOPE" \
-    --condition "category=Administrative and operationName=Microsoft.Authorization/roleAssignments/write" \
+    --condition "category=Administrative and operationName=Microsoft.Authorization/roleAssignments/write and status=Succeeded" \
     --action-group "$AG_ID" --description "Someone granted a role in this subscription. Expected only when you run setup.sh."
 }
 

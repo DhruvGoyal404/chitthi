@@ -5,6 +5,7 @@ import { ConversationInfo } from './screens/ConversationInfo.js';
 import { MessageInfo } from './screens/MessageInfo.js';
 import { NewChat } from './screens/NewChat.js';
 import { NewGroup } from './screens/NewGroup.js';
+import { Privacy, Terms } from './screens/Legal.js';
 import { Settings } from './screens/Settings.js';
 import { Shell } from './screens/Shell.js';
 import { SignIn } from './screens/SignIn.js';
@@ -28,6 +29,9 @@ export function App() {
     <Routes>
       <Route path="/signin" element={<SignInRoute />} />
       <Route path="/welcome" element={<WelcomeRoute />} />
+      {/* Public, signed in or not: Google's consent screen links to both. */}
+      <Route path="/privacy" element={<Privacy />} />
+      <Route path="/terms" element={<Terms />} />
       <Route element={<Shell />}>
         <Route index element={null} />
         <Route path="c/:id" element={<Chat />} />

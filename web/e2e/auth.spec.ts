@@ -52,3 +52,18 @@ test('sign-in errors from a provider round trip read calmly', async ({ page }) =
   await page.getByRole('link', { name: 'Back to sign-in' }).click();
   await expect(page).toHaveURL(/\/signin$/);
 });
+
+test('privacy and terms are public, linked from sign-in, and say the plain facts', async ({ page }) => {
+  await page.goto('/signin');
+  await page.getByRole('link', { name: 'Privacy' }).click();
+  await expect(page).toHaveURL(/\/privacy$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Privacy' })).toBeVisible();
+  await expect(page.getByRole('main')).toContainText('the server, and anyone with access to its database, can read every message');
+  await expect(page.getByRole('main')).toContainText('Database copies are deleted after 35 days');
+  await expect(page.getByRole('link', { name: 'privacy@dhruvgoyal.tech' })).toHaveAttribute('href', 'mailto:privacy@dhruvgoyal.tech');
+  await page.getByRole('link', { name: 'Terms' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Terms' })).toBeVisible();
+  // A deep link works too: the static server answers with the app shell.
+  await page.goto('/terms');
+  await expect(page.getByRole('heading', { level: 1, name: 'Terms' })).toBeVisible();
+});

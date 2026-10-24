@@ -58,4 +58,22 @@ headers=$(curl -fsS -H 'Accept-Encoding: gzip' -D - -o /dev/null "http://127.0.0
 grep -qi '^Content-Encoding: gzip' <<<"$headers" || fail "assets are not served precompressed"
 grep -qF 'Cache-Control: public, max-age=31536000, immutable' <<<"$headers" || fail "assets are not cached as immutable"
 echo "ok   deep links get the app shell, a missing asset is a 404, assets are gzip and immutable"
+
+# The public pages Google's consent screen links to, and the icons and manifest.
+for page in /privacy /terms; do
+  code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:5175$page")
+  [[ $code == 200 ]] || fail "$page got $code, not the app shell"
+done
+type_of() { curl -fsS -D - -o /dev/null "http://127.0.0.1:5175$1" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Tt]ype: //p'; }
+[[ $(type_of /manifest.webmanifest) == application/manifest+json* ]] || fail "the manifest is served as '$(type_of /manifest.webmanifest)'"
+curl -fsS http://127.0.0.1:5175/manifest.webmanifest | jq -e '.icons | length == 4' >/dev/null || fail "the manifest is not valid JSON with four icons"
+[[ $(type_of /favicon.ico) == image/x-icon* ]] || fail "favicon.ico is served as '$(type_of /favicon.ico)'"
+for icon in favicon-32.png apple-touch-icon.png icon-192.png icon-512.png icon-maskable-192.png icon-maskable-512.png; do
+  [[ $(type_of "/$icon") == image/png* ]] || fail "/$icon is not served as a PNG"
+done
+[[ $(type_of /robots.txt) == text/plain* ]] || fail "robots.txt is served as '$(type_of /robots.txt)'"
+curl -fsS http://127.0.0.1:5175/robots.txt | grep -qx 'Disallow: /api/' || fail "robots.txt does not keep crawlers out of /api/"
+[[ $(type_of /sitemap.xml) == application/xml* ]] || fail "sitemap.xml is served as '$(type_of /sitemap.xml)'"
+curl -fsS http://127.0.0.1:5175/sitemap.xml | grep -qF '<loc>https://chitthi.dhruvgoyal.tech/privacy</loc>' || fail "sitemap.xml does not list /privacy"
+echo "ok   /privacy and /terms get the app shell; manifest, favicon, icons, robots.txt and sitemap.xml served with their types"
 echo "all image checks passed"

@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, type SubmitEvent } from 'react';
-import { useNavigate, useSearchParams } from 'react-router';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 import { Button, Field, Icon } from '../components/ui.js';
 import { buttonClass } from '../components/styles.js';
 import { api, ApiError } from '../lib/api.js';
@@ -89,6 +89,11 @@ export function SignIn() {
         </div>
         <p className="mt-4 text-center text-xs text-ink-soft">
           Not end-to-end encrypted: the server can read your messages.
+        </p>
+        <p className="mt-2 text-center text-xs text-ink-soft">
+          <Link to="/privacy" className="underline underline-offset-2">Privacy</Link>
+          {' · '}
+          <Link to="/terms" className="underline underline-offset-2">Terms</Link>
         </p>
       </div>
     </main>

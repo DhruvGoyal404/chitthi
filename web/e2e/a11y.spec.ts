@@ -10,6 +10,11 @@ for (const scheme of ['light', 'dark'] as const) {
     await page.goto('/signin?error=account_exists&provider=github');
     await expect(page.getByRole('alert')).toBeVisible();
     await expectAccessible(page, 'sign in with an error');
+    for (const [path, title] of [['/privacy', 'Privacy'], ['/terms', 'Terms']] as const) {
+      await page.goto(path);
+      await expect(page.getByRole('heading', { level: 1, name: title })).toBeVisible();
+      await expectAccessible(page, title.toLowerCase());
+    }
 
     // First sign-in (welcome), with a field error showing.
     await pendingSignup(page, 'Asha Rao');

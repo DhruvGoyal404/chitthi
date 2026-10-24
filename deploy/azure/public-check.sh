@@ -47,6 +47,11 @@ code=$("${c[@]}" -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: applic
 [[ $code == 403 ]] && ok "POST without Origin refused" || bad "a POST without Origin got $code"
 code=$("${c[@]}" -o /dev/null -w '%{http_code}' -X POST -H "Origin: $ORIGIN" -H 'Content-Type: application/json' -d '{}' "https://$HOST/api/dev/login" || true)
 [[ $code == 404 ]] && ok "no dev sign-in" || bad "the dev sign-in answered $code"
+# Google's consent screen links to these: they must answer for anyone.
+for page in /privacy /terms; do
+  code=$("${c[@]}" -o /dev/null -w '%{http_code}' "https://$HOST$page" || true)
+  [[ $code == 200 ]] && ok "$page answers" || bad "$page got $code"
+done
 
 # Nothing but 80 and 443 answers: SSH and Postgres must time out or be refused.
 for port in 22 5432 5435 8082 5175; do

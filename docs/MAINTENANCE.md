@@ -147,6 +147,8 @@ of this repo, unless a step says GitHub, a browser or another service.
     - Google Cloud console → APIs & Services → Credentials → Create OAuth client ID → Web application.
     - Authorized redirect URI: `https://chitthi.dhruvgoyal.tech/api/auth/google/callback`.
     - On the consent screen (external), publish the app. Otherwise only test users can sign in, and email/profile scopes need no verification.
+    - Consent screen links: home page `https://chitthi.dhruvgoyal.tech`, privacy policy `https://chitthi.dhruvgoyal.tech/privacy`, terms `https://chitthi.dhruvgoyal.tech/terms`. The pages are public, and the deploy's outside check confirms they answer.
+    - **Mail forwarding:** both pages publish `privacy@dhruvgoyal.tech` as the contact. Set up forwarding from it to your inbox at your domain's email or DNS provider, then send a test mail and confirm it arrives.
     - Keep the client ID and secret for step 15.
 11. **GitHub OAuth app:**
     - GitHub → Settings → Developer settings → OAuth Apps → New.
@@ -605,10 +607,10 @@ Everything below emails you. Each row says what it means and where to start; "In
 | Alert | From | Means | First move |
 |---|---|---|---|
 | `vm-unavailable` (severity 1) | Azure metric | The VM is down or unreachable to Azure for 5 minutes | "The VM is down" |
-| `vm-resource-health` | Azure activity log | Azure itself reports the VM degraded (host failure, maintenance) | Read the event, then "The VM is down" |
+| `vm-resource-health` | Azure activity log | Azure itself reports the VM's health changing: a host failure, maintenance, or a reboot. **Expected:** several during `setup.sh infra` (the VM is created, its disk attached and boot diagnostics enabled, and it reports Unknown, then Unavailable, then Available), and one around a security-update reboot (21:30 UTC, when one is needed) | Outside those times: read the event, then "The VM is down" |
 | `vm-low-memory` | Azure metric | Under 100 MiB available for 15 minutes | `status.sh`: which container grew? See "Memory budget" |
 | `vm-cpu-credits-low` | Azure metric | The burstable VM is about to be held to its baseline CPU | `status.sh`. A sustained load means the VM size no longer fits |
-| `role-assignment-changed` | Azure activity log | Someone granted a role in the subscription | Expected only when you run `setup.sh`. Otherwise treat it as a compromise ("A credential is exposed") |
+| `role-assignment-changed` | Azure activity log | A role assignment in the subscription succeeded. **Expected** only from `setup.sh infra` when it makes one: 5 on the first run (2 for the VM, 2 for you, 1 for the deploy identity), none on re-runs. Before 2026-10-24 the alert matched "Started" as well, so the first run sent 10. Deploys and backups never assign roles | Any other time: treat it as a compromise ("A credential is exposed") |
 | Budget 50 / 80 / 100 % and 100 % forecast | Azure Cost Management | Spending this month | Cost Management → Cost analysis, grouped by resource |
 | `chitthi-backup` down | healthchecks.io | Last night's backup failed (the reason is in the ping), didn't run, or `/data` is 80 % full | "A backup alert" |
 | `chitthi-drill` down | healthchecks.io | The monthly restore drill failed or didn't run | "A backup alert" |

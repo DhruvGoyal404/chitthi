@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The public pages only: conversations are behind sign-in and never listed. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://chitthi.dhruvgoyal.tech/</loc><lastmod>2026-10-24</lastmod></url>
+  <url><loc>https://chitthi.dhruvgoyal.tech/signin</loc><lastmod>2026-10-24</lastmod></url>
+  <url><loc>https://chitthi.dhruvgoyal.tech/privacy</loc><lastmod>2026-10-24</lastmod></url>
+  <url><loc>https://chitthi.dhruvgoyal.tech/terms</loc><lastmod>2026-10-24</lastmod></url>
+</urlset>

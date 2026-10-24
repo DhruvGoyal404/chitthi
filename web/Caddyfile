@@ -26,6 +26,16 @@
 		-Server
 	}
 
+	# Types this image can't look up (bare Alpine has no MIME table), so they're never sniffed.
+	@manifest path /manifest.webmanifest
+	header @manifest Content-Type "application/manifest+json"
+	@ico path *.ico
+	header @ico Content-Type "image/x-icon"
+	@robots path /robots.txt
+	header @robots Content-Type "text/plain; charset=utf-8"
+	@sitemap path /sitemap.xml
+	header @sitemap Content-Type "application/xml; charset=utf-8"
+
 	# Hashed build output never changes under a name: cache it for a year. A missing asset is a 404,
 	# never the app shell (a stale tab would otherwise run HTML as a script).
 	handle /assets/* {
