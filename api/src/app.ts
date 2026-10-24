@@ -34,7 +34,9 @@ export function createApp({
 
   app.use(pinoHttp({ logger }));
   app.use(requireAllowedOrigin(config.webOrigins));
-  app.use(express.json({ limit: '100kb' }));
+  // No client compresses request bodies. Refusing them (415) also closes GHSA-27r3-jxmh-p828:
+  // body-parser ≤ 2.3.0 crashes the process on a compressed body with trailing bytes.
+  app.use(express.json({ limit: '100kb', inflate: false }));
 
   const api = express.Router();
   api.use(healthRouter(pool));

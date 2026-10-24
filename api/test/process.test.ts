@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DB_PASSWORD, UNREACHABLE_DB_URL, WEB_ORIGIN } from './helpers.js';
 
@@ -64,6 +65,22 @@ describe('api process', () => {
 
     const health = await fetch(`${baseUrl}/api/health`);
     expect(health.status).toBe(503);
+    expect(child.exitCode).toBeNull();
+  });
+
+  // GHSA-27r3-jxmh-p828: in body-parser ≤ 2.3.0, a compressed body followed by trailing bytes
+  // throws from the finished decoder after the response, killing the process. No client sends
+  // compressed request bodies, so the parser refuses them (inflate: false) before decompressing.
+  it('refuses compressed request bodies, and survives one with trailing bytes', async () => {
+    const res = await fetch(`${baseUrl}/api/health`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', Origin: WEB_ORIGIN },
+      body: Buffer.concat([gzipSync('{"a":1}'), Buffer.from('trailing bytes')]),
+    });
+    expect(res.status).toBe(415);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('invalid_body');
+    await new Promise((resolve) => setTimeout(resolve, 200)); // the crash came just after the response
+    expect((await fetch(`${baseUrl}/api/health`)).status).toBe(503);
     expect(child.exitCode).toBeNull();
   });
 
