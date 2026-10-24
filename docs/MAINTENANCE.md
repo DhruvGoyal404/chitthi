@@ -219,7 +219,7 @@ prints its output, and exits with its exit code. Afterwards it deletes the run c
 
 ### GitHub: a public repo
 
-The repo is public (decided 2026-10-24). That brings unmetered Actions minutes for standard runners, environments and rulesets on the Free plan. Before the flip, the whole history was scanned with gitleaks (v8.30.1): three findings, all made-up test values in `api/test/oauth.db.test.ts`, are recorded in `.gitleaksignore`. The tracked files were searched for account, subscription and tenant IDs, emails, IPs, keys and service URLs, and nothing was found:
+The repo is public (decided and made public on 2026-10-24, after CI run 40081823261 passed on 4a657ad). That brings unmetered Actions minutes for standard runners, environments and rulesets on the Free plan. Before the flip, the whole history was scanned with gitleaks (v8.30.1): three findings, all made-up test values in `api/test/oauth.db.test.ts`, are recorded in `.gitleaksignore`. The tracked files were searched for account, subscription and tenant IDs, emails, IPs, keys and service URLs, and nothing was found:
 - Azure resource names derive from the subscription when `setup.sh` runs, and are never committed.
 - The only addresses are loopback, Azure's documented platform addresses, private ranges and RFC 5737 documentation addresses in tests.
 - CI's `secrets-scan` job runs gitleaks over the full history on every push.
