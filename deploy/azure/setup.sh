@@ -118,6 +118,36 @@ AG_ID=$SUB_SCOPE/resourceGroups/$HOST_RG/providers/microsoft.insights/actionGrou
 
 me() { v ad signed-in-user show --query id; }
 
+# The subject GitHub puts in the deploy job's OIDC token. GitHub sends the immutable-ID form,
+# repo:<owner>@<owner id>/<repo>@<repo id>:environment:<name>, not repo:<owner>/<repo>:...: the
+# first deploy failed on exactly that (docs/MAINTENANCE.md, "Incidents"). Built from the GitHub
+# API, never typed, and compared as an exact string by check().
+github_subject() {
+  local repo subject
+  repo=$(curl -fsS --max-time 15 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$GITHUB_REPO") \
+    || die "could not read $GITHUB_REPO from the GitHub API (the OIDC subject needs its ids)"
+  subject=$(jq -er --arg env "$GITHUB_ENVIRONMENT" '"repo:\(.owner.login)@\(.owner.id)/\(.name)@\(.id):environment:\($env)"' <<<"$repo") \
+    || die "the GitHub API's answer for $GITHUB_REPO has no owner and repo ids"
+  [[ $subject =~ ^repo:[A-Za-z0-9-]+@[0-9]+/[A-Za-z0-9._-]+@[0-9]+:environment:[A-Za-z0-9_-]+$ ]] || die "unexpected OIDC subject '$subject'"
+  printf '%s' "$subject"
+}
+
+lock() { # <resource group> <resource> <resource type> <notes>: a CanNotDelete lock, create or update
+  if exists lock show --name do-not-delete -g "$1" --resource "$2" --resource-type "$3"; then
+    q lock update --name do-not-delete -g "$1" --resource "$2" --resource-type "$3" --lock-type CanNotDelete --notes "$4"
+  else
+    q lock create --name do-not-delete -g "$1" --resource "$2" --resource-type "$3" --lock-type CanNotDelete --notes "$4"
+  fi
+}
+
+allow_in() { # <rule name> <priority> <port>: an inbound TCP allow from the Internet, create or update
+  local verb=create
+  exists network nsg rule show -g "$HOST_RG" --nsg-name "$NSG" -n "$1" && verb=update
+  q network nsg rule "$verb" -g "$HOST_RG" --nsg-name "$NSG" -n "$1" --priority "$2" --direction Inbound \
+    --access Allow --protocol Tcp --source-address-prefixes Internet --source-port-ranges '*' \
+    --destination-address-prefixes '*' --destination-port-ranges "$3"
+}
+
 # Role assignment, idempotent. New principals take a while to replicate, and new custom roles to
 # become assignable, so it retries.
 assign() { # <principal id> <principal type> <role> <scope>
@@ -263,12 +293,8 @@ network() {
     || q network vnet create -g "$HOST_RG" -n "$VNET" -l "$LOCATION" --address-prefixes 10.20.0.0/24 \
          --subnet-name "$SUBNET" --subnet-prefixes 10.20.0.0/26
   exists network nsg show -g "$HOST_RG" -n "$NSG" || q network nsg create -g "$HOST_RG" -n "$NSG" -l "$LOCATION"
-  q network nsg rule create -g "$HOST_RG" --nsg-name "$NSG" -n allow-http --priority 100 --direction Inbound \
-    --access Allow --protocol Tcp --source-address-prefixes Internet --source-port-ranges '*' \
-    --destination-address-prefixes '*' --destination-port-ranges 80
-  q network nsg rule create -g "$HOST_RG" --nsg-name "$NSG" -n allow-https --priority 110 --direction Inbound \
-    --access Allow --protocol Tcp --source-address-prefixes Internet --source-port-ranges '*' \
-    --destination-address-prefixes '*' --destination-port-ranges 443
+  allow_in allow-http 100 80
+  allow_in allow-https 110 443
   exists network public-ip show -g "$HOST_RG" -n "$PIP" \
     || q network public-ip create -g "$HOST_RG" -n "$PIP" -l "$LOCATION" --sku Standard --allocation-method Static --version IPv4
 }
@@ -276,8 +302,7 @@ network() {
 create_vm() {
   exists disk show -g "$HOST_RG" -n "$DATA_DISK" \
     || q disk create -g "$HOST_RG" -n "$DATA_DISK" -l "$LOCATION" --size-gb "$DATA_DISK_GB" --sku "$DISK_SKU"
-  q lock create --name do-not-delete --lock-type CanNotDelete -g "$HOST_RG" --resource "$DATA_DISK" \
-    --resource-type Microsoft.Compute/disks --notes "Chat history and media live here"
+  lock "$HOST_RG" "$DATA_DISK" Microsoft.Compute/disks "Chat history and media live here"
 
   if ! exists vm show -g "$HOST_RG" -n "$VM"; then
     local keydir
@@ -329,8 +354,7 @@ storage() {
                  filters: {blobTypes: ["blockBlob"], prefixMatch: ["\($c)/db/", "\($c)/manifests/", "\($c)/selftest/"]}}}]}' > "$policy"
   q storage account management-policy create -g "$APP_RG" --account-name "$SA" --policy @"$policy"
   rm -f "$policy"
-  q lock create --name do-not-delete --lock-type CanNotDelete -g "$APP_RG" --resource "$SA" \
-    --resource-type Microsoft.Storage/storageAccounts --notes "Off-VM backups"
+  lock "$APP_RG" "$SA" Microsoft.Storage/storageAccounts "Off-VM backups"
 }
 
 key_vault() {
@@ -338,8 +362,7 @@ key_vault() {
   exists keyvault show -g "$APP_RG" -n "$KV" \
     || q keyvault create -g "$APP_RG" -n "$KV" -l "$LOCATION" --sku standard \
          --enable-rbac-authorization true --enable-purge-protection true --retention-days 90
-  q lock create --name do-not-delete --lock-type CanNotDelete -g "$APP_RG" --resource "$KV" \
-    --resource-type Microsoft.KeyVault/vaults --notes "Secrets, including the backups' private key"
+  lock "$APP_RG" "$KV" Microsoft.KeyVault/vaults "Secrets, including the backups' private key"
 }
 
 identities() { # <owner's object id>
@@ -360,31 +383,54 @@ identities() { # <owner's object id>
   assign "$1" User "Storage Blob Data Contributor" "$CONTAINER_ID"
 
   exists identity show -g "$APP_RG" -n "$DEPLOY_ID" || q identity create -g "$APP_RG" -n "$DEPLOY_ID" -l "$LOCATION"
-  q identity federated-credential create -g "$APP_RG" --identity-name "$DEPLOY_ID" -n "github-$GITHUB_ENVIRONMENT" \
-    --issuer https://token.actions.githubusercontent.com --subject "repo:$GITHUB_REPO:environment:$GITHUB_ENVIRONMENT" \
-    --audiences api://AzureADTokenExchange
+  local subject verb=create
+  subject=$(github_subject)
+  exists identity federated-credential show -g "$APP_RG" --identity-name "$DEPLOY_ID" -n "github-$GITHUB_ENVIRONMENT" && verb=update
+  q identity federated-credential "$verb" -g "$APP_RG" --identity-name "$DEPLOY_ID" -n "github-$GITHUB_ENVIRONMENT" \
+    --issuer https://token.actions.githubusercontent.com --subject "$subject" --audiences api://AzureADTokenExchange
+  log "deploy identity trusts $subject"
   deploy_pid=$(v identity show -g "$APP_RG" -n "$DEPLOY_ID" --query principalId)
   assign "$deploy_pid" ServicePrincipal "$RUNCMD_ROLE" "$VM_ID"
 }
 
 alerts() { # <email>
   log "alerts to $1"
-  q monitor action-group create -g "$HOST_RG" -n "$ACTION_GROUP" --short-name ops --action email owner "$1"
+  local current
+  if exists monitor action-group show -g "$HOST_RG" -n "$ACTION_GROUP"; then
+    current=$(v monitor action-group show -g "$HOST_RG" -n "$ACTION_GROUP" --query "emailReceivers[?name=='owner'].emailAddress | [0]")
+    [[ $current == "$1" ]] || q monitor action-group update -g "$HOST_RG" -n "$ACTION_GROUP" --remove-action owner --add-action email owner "$1"
+  else
+    q monitor action-group create -g "$HOST_RG" -n "$ACTION_GROUP" --short-name ops --action email owner "$1"
+  fi
+  # Create or update: `create` refuses an alert that exists. An existing metric alert keeps its
+  # condition (update can't replace one in place); everything else is set again.
   metric() { # <name> <severity> <window> <frequency> <condition> <description>
-    q monitor metrics alert create -g "$HOST_RG" -n "$1" --scopes "$VM_ID" --severity "$2" --window-size "$3" \
-      --evaluation-frequency "$4" --condition "$5" --description "$6" --action "$AG_ID" --auto-mitigate true
+    if exists monitor metrics alert show -g "$HOST_RG" -n "$1"; then
+      q monitor metrics alert update -g "$HOST_RG" -n "$1" --severity "$2" --window-size "$3" \
+        --evaluation-frequency "$4" --description "$6" --auto-mitigate true --enabled true
+    else
+      q monitor metrics alert create -g "$HOST_RG" -n "$1" --scopes "$VM_ID" --severity "$2" --window-size "$3" \
+        --evaluation-frequency "$4" --condition "$5" --description "$6" --action "$AG_ID" --auto-mitigate true
+    fi
+  }
+  activity() { # <name> <condition> <description>
+    if exists monitor activity-log alert show -g "$HOST_RG" -n "$1"; then
+      q monitor activity-log alert update -g "$HOST_RG" -n "$1" --condition "$2" --description "$3" --enabled true
+    else
+      q monitor activity-log alert create -g "$HOST_RG" -n "$1" --scope "$SUB_SCOPE" --condition "$2" \
+        --action-group "$AG_ID" --description "$3"
+    fi
   }
   metric vm-unavailable 1 5m 1m "avg VmAvailabilityMetric < 1" "The VM is down or unreachable to Azure."
   metric vm-low-memory 2 15m 5m "avg Available Memory Bytes < 104857600" \
     "Under 100 MiB available for 15 minutes (docs/MAINTENANCE.md, Memory budget)."
   metric vm-cpu-credits-low 2 15m 5m "avg CPU Credits Remaining < 30" \
     "The burstable VM is close to being throttled to its baseline."
-  q monitor activity-log alert create -g "$HOST_RG" -n vm-resource-health --scope "$SUB_SCOPE" \
-    --condition "category=ResourceHealth and resourceId=$VM_ID" --action-group "$AG_ID" \
-    --description "Azure reports the VM degraded or unavailable."
-  q monitor activity-log alert create -g "$HOST_RG" -n role-assignment-changed --scope "$SUB_SCOPE" \
-    --condition "category=Administrative and operationName=Microsoft.Authorization/roleAssignments/write and status=Succeeded" \
-    --action-group "$AG_ID" --description "Someone granted a role in this subscription. Expected only when you run setup.sh."
+  activity vm-resource-health "category=ResourceHealth and resourceId=$VM_ID" \
+    "Azure reports the VM degraded or unavailable."
+  activity role-assignment-changed \
+    "category=Administrative and operationName=Microsoft.Authorization/roleAssignments/write and status=Succeeded" \
+    "Someone granted a role in this subscription. Expected only when you run setup.sh."
 }
 
 set_budget() { # <email> [amount]
@@ -577,8 +623,12 @@ check() { # [infra|summary]: secrets not yet stored are reported as todo, not co
   got=$(json role assignment list --all --query "[?principalId=='$deploy_pid'].join('@', [roleDefinitionName, scope])" | jq -r 'join(" ")' | lower)
   expect "the deploy identity holds exactly: Run Command on $VM" "$got" "$(echo "$RUNCMD_ROLE@$VM_ID" | lower)"
   got=$(j identity federated-credential list -g "$APP_RG" --identity-name "$DEPLOY_ID" --query "[].{issuer: issuer, subject: subject, audiences: audiences}")
-  expect "the deploy identity trusts only $GITHUB_REPO's '$GITHUB_ENVIRONMENT' environment" "$got" \
-    "[{\"audiences\":[\"api://AzureADTokenExchange\"],\"issuer\":\"https://token.actions.githubusercontent.com\",\"subject\":\"repo:$GITHUB_REPO:environment:$GITHUB_ENVIRONMENT\"}]"
+  # The exact subject GitHub sends, from its API: a hand-built repo:<owner>/<repo> form passed
+  # this check once while Azure refused every sign-in.
+  local want_subject
+  want_subject=$(github_subject)
+  expect "the deploy identity trusts exactly $want_subject" "$got" \
+    "$(jq -cn --arg s "$want_subject" '[{audiences: ["api://AzureADTokenExchange"], issuer: "https://token.actions.githubusercontent.com", subject: $s}]')"
 
   # Key Vault and its secrets (names only)
   got=$(j keyvault show -g "$APP_RG" -n "$KV" --query "{rbac: properties.enableRbacAuthorization, purgeProtection: properties.enablePurgeProtection, softDelete: properties.enableSoftDelete}")

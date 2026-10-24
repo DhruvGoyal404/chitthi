@@ -5,6 +5,7 @@ age into failures instead of skips.
 """
 
 import datetime as dt
+import json
 import os
 import shutil
 import subprocess
@@ -218,6 +219,117 @@ class RunOnVm(unittest.TestCase):
             self.assertEqual(r.returncode, 1)
             self.assertIn("doesn't look like a GitHub token", r.stderr)
             self.assertFalse(os.path.exists(os.path.join(tmp, "args.log")), "az was called")
+
+
+def _has_jmespath():
+    try:
+        import jmespath  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+# Answers the one GitHub API call setup.sh makes, with the real ids.
+FAKE_CURL = r"""#!/usr/bin/env bash
+for a in "$@"; do url=$a; done
+case $url in
+  https://api.github.com/repos/DhruvGoyal404/chitthi)
+    echo '{"id": 1425788626, "name": "chitthi", "owner": {"login": "DhruvGoyal404", "id": 151380878}}' ;;
+  *) echo "fake curl: unexpected $url" >&2; exit 22 ;;
+esac
+"""
+SUBJECT = "repo:DhruvGoyal404@151380878/chitthi@1425788626:environment:production"
+
+
+@unittest.skipUnless(os.environ.get("REQUIRE_JMESPATH") == "1" or (_has_jmespath() and shutil.which("bash") and shutil.which("jq")),
+                     "needs bash, jq and jmespath")
+class SetupInfra(unittest.TestCase):
+    """setup.sh against the stand-in az (fake_az.py), which refuses `create` on anything that
+    exists and evaluates setup.sh's real --query strings."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.setup = os.path.join(here, "setup.sh")
+        fake = os.path.join(here, "fake_az.py").replace("\\", "/")
+        python = sys.executable.replace("\\", "/")
+        # On Windows (Git Bash), @/tmp/... files need a Windows path for python.exe; cygpath exists only there.
+        shim = ('#!/usr/bin/env bash\nargs=()\nfor a in "$@"; do\n'
+                '  if [[ $a == @/* ]] && command -v cygpath >/dev/null; then a="@$(cygpath -w "${a#@}")"; fi\n'
+                f'  args+=("$a")\ndone\nexec "{python}" "{fake}" "${{args[@]}}"\n')
+        for name, body in (("az", shim), ("curl", FAKE_CURL)):
+            with open(os.path.join(self.dir, name), "w", newline="\n") as f:
+                f.write(body)
+            os.chmod(os.path.join(self.dir, name), 0o755)
+        self.state = os.path.join(self.dir, "state.json")
+        # MSYS_NO_PATHCONV: Git Bash on Windows would rewrite /subscriptions/... into a Windows path.
+        self.env = {**os.environ, "PATH": self.dir + os.pathsep + os.environ["PATH"], "FAKE_AZ_STATE": self.state,
+                    "MSYS_NO_PATHCONV": "1", "MSYS2_ARG_CONV_EXCL": "*"}
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def setup_sh(self, *args):
+        return subprocess.run([shutil.which("bash"), self.setup, *args], capture_output=True, text=True, env=self.env,
+                              stdin=subprocess.DEVNULL, timeout=600)
+
+    def infra(self):
+        return self.setup_sh("infra", "alert_email=ops@example.com", "region=malaysiawest", "disks=premium",
+                             "image=Canonical:ubuntu-24_04-lts:server:24.04.202610210")
+
+    def calls(self):
+        with open(self.state + ".log", encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
+    def state_json(self):
+        with open(self.state, encoding="utf-8") as f:
+            return json.load(f)
+
+    def save(self, state):
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+    def test_infra_twice_creates_then_only_updates(self):
+        first = self.infra()
+        self.assertEqual(first.returncode, 0, first.stdout[-3000:] + first.stderr[-2000:])
+        self.assertIn("all checks passed", first.stdout)
+        n = len(self.calls())
+        second = self.infra()
+        self.assertEqual(second.returncode, 0, second.stdout[-3000:] + second.stderr[-2000:])
+        self.assertIn("all checks passed", second.stdout)
+        rerun = [c for c in self.calls()[n:]]
+        # Nothing that exists is created again (the stand-in would refuse it); these are updated.
+        creates = [c[:4] for c in rerun if "create" in c[:4] and c[0] not in ("group", "storage")]
+        self.assertEqual(creates, [], creates)
+        for prefix in (["identity", "federated-credential", "update"], ["monitor", "activity-log", "alert", "update"],
+                       ["monitor", "metrics", "alert", "update"], ["network", "nsg", "rule", "update"], ["lock", "update"]):
+            self.assertTrue(any(c[:len(prefix)] == prefix for c in rerun), f"the re-run never ran {' '.join(prefix)}")
+        fic = self.state_json()["res"]["fic"]["chitthi-deploy/github-production"]
+        self.assertEqual(fic, {"issuer": "https://token.actions.githubusercontent.com", "subject": SUBJECT,
+                               "audiences": ["api://AzureADTokenExchange"]})
+
+    def test_a_wrong_subject_fails_check_and_infra_repairs_it(self):
+        self.assertEqual(self.infra().returncode, 0)
+        state = self.state_json()
+        # What the first go-live attempt had: the repo:<owner>/<repo> form GitHub doesn't send.
+        state["res"]["fic"]["chitthi-deploy/github-production"]["subject"] = "repo:DhruvGoyal404/chitthi:environment:production"
+        self.save(state)
+        check = self.setup_sh("check")
+        self.assertNotEqual(check.returncode, 0)
+        self.assertIn(f"FAIL the deploy identity trusts exactly {SUBJECT}", check.stdout)
+        self.assertEqual(self.infra().returncode, 0)
+        summary = self.setup_sh("summary")
+        self.assertIn(f"ok   the deploy identity trusts exactly {SUBJECT}", summary.stdout)
+
+    def test_alerts_left_by_an_earlier_run_are_updated_not_recreated(self):
+        # Go-live: an earlier run had created the alerts, and `create` failed on the re-run.
+        self.save({"res": {"activity-log": {"vm-resource-health": {"enabled": False, "condition": "old", "description": "old"},
+                                            "role-assignment-changed": {"enabled": True, "condition": "old", "description": "old"}}}})
+        r = self.infra()
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-2000:])
+        alert = self.state_json()["res"]["activity-log"]["role-assignment-changed"]
+        self.assertIn("status=Succeeded", alert["condition"])
+        self.assertTrue(self.state_json()["res"]["activity-log"]["vm-resource-health"]["enabled"])
 
 
 def _has_yaml():

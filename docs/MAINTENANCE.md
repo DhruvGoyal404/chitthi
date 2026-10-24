@@ -91,7 +91,7 @@ replaces a stored secret.
 | | Budget | `apps-host`, monthly, for the whole subscription. Default ₹700 (pass `budget=` if the billing currency isn't INR). Email at 50, 80 and 100 % actual, and at 100 % forecast. |
 | `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS, Hot tier (switched back from Cool on 2026-10-24: at a few GB the difference is a few rupees, and Hot has no early-deletion or retrieval charges). Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
 | | Key Vault `chitthi-kv-<6 hex>` | Standard, RBAC, purge protection, 90-day soft delete, delete lock. |
-| | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404/chitthi:environment:production`. |
+| | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404@151380878/chitthi@1425788626:environment:production` (the immutable-ID form GitHub sends; `setup.sh` builds it from the GitHub API). |
 
 The `<6 hex>` suffix comes from the subscription id, so every run finds the same names.
 
@@ -235,7 +235,7 @@ The repo is public (decided and made public on 2026-10-24, after CI run 40081823
 - CI's `secrets-scan` job runs gitleaks over the full history on every push.
 
 What protects deploys now:
-- **The `production` environment:** each deploy job waits until you approve it, and only runs from `main`. Azure's federated credential trusts only `repo:DhruvGoyal404/chitthi:environment:production`, so no other job, branch or workflow can sign in.
+- **The `production` environment:** each deploy job waits until you approve it, and only runs from `main`. Azure's federated credential trusts only `repo:DhruvGoyal404@151380878/chitthi@1425788626:environment:production` (the immutable-ID form GitHub sends; `setup.sh` builds it from the GitHub API), so no other job, branch or workflow can sign in.
 - **Account identifiers are environment secrets,** not variables: the client, tenant and subscription IDs, the Key Vault and storage names, the bucket and your email. Actions logs are public, and secrets are masked in them. Only resource-group, VM and container names are plain variables.
 - **A ruleset on `main`** forbids deleting it and force-pushing to it.
 - **Workflows from outside contributors' pull requests** wait for your approval, and run with a read-only token, without the environment or its secrets.
@@ -401,7 +401,7 @@ bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh smoke
 
   The workflow's default is `permissions: {}`. `deploy/azure/test_azure_tools.py` asserts every block, the environment, and that only deploy-job steps pass a token to `run-on-vm.sh`.
 - **The deploy job** runs in the `production` environment, from `main`, once you approve it:
-  - It signs in to Azure as `chitthi-deploy` by OIDC. No credential is stored anywhere. Azure trusts only tokens for `repo:DhruvGoyal404/chitthi:environment:production`, and the identity can only use managed Run Command on the VM.
+  - It signs in to Azure as `chitthi-deploy` by OIDC. No credential is stored anywhere. Azure trusts only tokens for `repo:DhruvGoyal404@151380878/chitthi@1425788626:environment:production` (the immutable-ID form GitHub sends; `setup.sh` builds it from the GitHub API), and the identity can only use managed Run Command on the VM.
   - Account identifiers come from environment secrets, which are masked in the public logs.
   - It runs `edge.sh` (a no-op unless `deploy/edge` changed), then `deploy.sh`.
   - It then runs [`deploy/azure/public-check.sh`](../deploy/azure/public-check.sh) from the internet. It checks health, at least 14 days left on the certificate, the headers, the redirect, the Origin refusals, and that ports 22, 5432, 5435, 8082 and 5175 are closed.
@@ -707,6 +707,11 @@ Start with `bash deploy/azure/run-on-vm.sh deploy/host/status.sh`. It shows memo
    - Let's Encrypt rate limits after repeated failed attempts.
 3. Fix the cause, then reload the edge: `run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=…`, or restart it.
 
+**The deploy can't sign in to Azure** (`AADSTS700213: No matching federated identity record found for presented assertion subject '…'`):
+- The error names the subject GitHub sent. Compare it with what the credential trusts: `az identity federated-credential list -g chitthi --identity-name chitthi-deploy -o table`.
+- `setup.sh infra` sets the credential from the GitHub API, and `setup.sh check` compares the exact string.
+- If GitHub ever changes the format again, update `github_subject()` in `setup.sh` and re-run `infra`. As a stopgap, `az identity federated-credential update … --subject "<the subject from the error>"`.
+
 **A deploy failed.** The workflow log shows which step failed. After the switch, a failure rolls back by itself, and the outside check then shows what's being served. Fix forward with a new commit.
 
 Migrations never roll back. A migration that broke the previous release breaks the expand-then-contract rule ("Deploy and rollback"). Repair the schema with a new migration, or as a last resort restore the pre-deploy dump (`/data/chitthi/pre-deploy/`) with `pg_restore` through a script.
@@ -750,6 +755,19 @@ At worst you lose everything since last night's backup (02:00 IST).
   4. Every deploy needs your approval, so an attacker with a stolen session could approve one. Revoke first.
 
 **Over budget:** Cost Management shows which resource. `az vm deallocate -g apps-host -n apps-vm` stops the VM's compute charges, and the site goes down.
+
+### Incident log
+
+**2026-10-24: go-live, the first deploy couldn't sign in to Azure.**
+- **What happened:** the Deploy workflow failed at OIDC sign-in with `AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:DhruvGoyal404@151380878/chitthi@1425788626:environment:production'`.
+- **Cause:** `setup.sh` had built the federated credential's subject by hand, as `repo:DhruvGoyal404/chitthi:environment:production`. GitHub sends the immutable-ID form, `repo:<owner>@<owner id>/<repo>@<repo id>:…` (the same as the CodeJudge AWS trust).
+- **Why nothing caught it:** `setup.sh check` compared the credential against the same hand-built string, so it reported ok. A check must not compute its expected value the way the thing it checks was built.
+- **Fixed by hand,** then by `setup.sh` itself:
+  - The subject was corrected in Cloud Shell (`az identity federated-credential update … --subject "repo:DhruvGoyal404@151380878/chitthi@1425788626:environment:production"`), and Deploy #11 was green.
+  - `setup.sh` now builds the subject from the GitHub API (owner id and repo id), and `check` compares that exact string.
+  - The federated credential, the alerts (the same go-live had stopped on "activity log alert vm-resource-health already exists"), the NSG rules and the locks are all create-or-update now, so an `infra` re-run can't revert the fix or fail on what exists.
+- **Tested:** CI runs `setup.sh infra` twice against a stand-in `az` (`deploy/azure/fake_az.py`). The stand-in refuses `create` on anything that exists, and evaluates `setup.sh`'s real queries with jmespath. The tests also prove that the old subject fails `check` and that a re-run repairs it, and that alerts left by an earlier run are updated.
+- **Still unproven by CI:** that GitHub keeps this format. Only a real deploy proves the subject; the incident playbook covers that ("The deploy can't sign in to Azure").
 
 ## Pending dependency upgrades
 

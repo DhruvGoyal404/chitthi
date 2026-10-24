@@ -162,9 +162,13 @@ jobs:
           sudo DATA_DEVICE="$dev" SWAP_SIZE=512M deploy/host/bootstrap.sh
           sudo DATA_DEVICE="$dev" SWAP_SIZE=512M deploy/host/bootstrap.sh
       # The Cloud Shell tools (deploy/azure): the backup keypair generator against the real age
-      # (installed by the bootstrap), SigV4 against AWS's test vector, the compaction's rules.
+      # (installed by the bootstrap), SigV4 against AWS's test vector, the compaction's rules, and
+      # setup.sh infra run twice against the stand-in az (fake_az.py, which needs jmespath).
       - name: Test the Cloud Shell tools
-        run: REQUIRE_AGE=1 REQUIRE_YAML=1 python3 -B -m unittest discover -s deploy/azure -v
+        run: |
+          python3 -m venv --system-site-packages "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install --quiet --require-hashes --no-deps -r deploy/azure/requirements-test.txt
+          REQUIRE_AGE=1 REQUIRE_YAML=1 REQUIRE_JMESPATH=1 "$RUNNER_TEMP/py/bin/python" -B -m unittest discover -s deploy/azure -v
       - name: Smoke-test and measure the production stack
         run: deploy/smoke/smoke.sh chitthi-api:ci chitthi-migrate:ci chitthi-web:ci
       - name: Deploy, re-deploy, a broken deploy that rolls itself back, explicit rollback
