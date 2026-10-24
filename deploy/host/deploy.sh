@@ -47,6 +47,25 @@ die() { echo "deploy: FAILED: $*" >&2; exit 1; }
 work=$(mktemp -d /run/chitthi-deploy.XXXXXX)
 trap 'rm -rf -- "$work"' EXIT
 
+# The repo is private. The deploy workflow hands over its own GITHUB_TOKEN (contents:read,
+# packages:read) in CHITTHI_GITHUB_TOKEN; GitHub revokes it when that job ends, minutes from now.
+# It stays in a 0600 header file and a throwaway Docker config, both under $work, and never on a
+# command line. Without it, files and images are fetched anonymously (a public repo).
+gh_token=${CHITTHI_GITHUB_TOKEN:-}
+unset CHITTHI_GITHUB_TOKEN
+if [[ -n $gh_token ]]; then
+  [[ $gh_token =~ ^gh[a-z]_[A-Za-z0-9_]+$ ]] || die "CHITTHI_GITHUB_TOKEN is not a GitHub token"
+  printf 'Authorization: Bearer %s\n' "$gh_token" > "$work/gh-auth"
+fi
+fetch() { # <path in the repo> <sha> <output file>
+  if [[ -f $work/gh-auth ]]; then
+    curl -fsSL --proto '=https' --max-time 30 -o "$3" -H @"$work/gh-auth" -H 'Accept: application/vnd.github.raw' \
+      "https://api.github.com/repos/$REPO/contents/$1?ref=$2"
+  else
+    curl -fsSL --proto '=https' --max-time 30 -o "$3" "https://raw.githubusercontent.com/$REPO/$2/$1"
+  fi
+}
+
 app() { docker compose -p chitthi --project-directory "$SRV" -f "$SRV/compose.yaml" "$@"; }
 edge() { docker compose -p edge --project-directory "$EDGE" -f "$EDGE/compose.yaml" "$@"; }
 
@@ -131,12 +150,14 @@ log "release ${arg[sha]}"
 files=(deploy/chitthi/compose.yaml deploy/edge/sites/chitthi.caddy deploy/host/backup.sh)
 for f in "${files[@]}"; do
   mkdir -p "$work/$(dirname "$f")"
-  if [[ -n $TEST_CONFIG_DIR ]]; then
+  # In CI a token means "fetch for real" (test-deploy.sh's first deploy), local copies otherwise.
+  if [[ -n $TEST_CONFIG_DIR && ! -f $work/gh-auth ]]; then
     cp "$TEST_CONFIG_DIR/$f" "$work/$f"
   else
-    curl -fsSL --proto '=https' --max-time 30 -o "$work/$f" "https://raw.githubusercontent.com/$REPO/${arg[sha]}/$f"
+    fetch "$f" "${arg[sha]}" "$work/$f" || die "could not fetch $f at ${arg[sha]}"
   fi
 done
+[[ -f $work/gh-auth ]] && log "configuration fetched through the GitHub API"
 
 # --- The new site file must validate together with the main Caddyfile and every other app's
 # site file as they are now, in a one-off container run like the edge (same image, uid and
@@ -212,11 +233,20 @@ docker compose -p chitthi --project-directory "$work" -f "$work/deploy/chitthi/c
   --env-file "$work/.env" config --quiet 2>/dev/null || die "the compose file at this commit is invalid"
 log "configuration and secrets ready"
 
-# --- Images, by digest, before anything stops.
+# --- Images, by digest, before anything stops. The registry login lives in a throwaway Docker
+# config under $work, so no credential is left in /root/.docker.
+install -d -m 0700 "$work/docker" # empty without a token: anonymous pulls
+if [[ -n $gh_token ]]; then
+  printf '%s' "$gh_token" | DOCKER_CONFIG=$work/docker docker login ghcr.io -u x-access-token --password-stdin >/dev/null 2>&1 \
+    || die "the registry refused the workflow's token"
+  log "signed in to ghcr.io with the workflow's token"
+fi
+unset gh_token
 if [[ -z $TEST_CONFIG_DIR ]]; then
-  for key in api migrate web; do docker pull -q "${arg[$key]}" >/dev/null; done
+  for key in api migrate web; do DOCKER_CONFIG=$work/docker docker pull -q "${arg[$key]}" >/dev/null; done
   log "images pulled"
 fi
+rm -rf "$work/docker" "$work/gh-auth"
 
 # --- Switch. The current release becomes the rollback point (unless this is a re-deploy of it).
 cp "$work/db.env" "$work/migrate.env" "$work/api.env" "$SRV/"

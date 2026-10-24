@@ -79,6 +79,9 @@ jobs:
     # (deploy/smoke/smoke.sh prints the MEMORY table). Publishing comes with the deploy workflow.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read # test-deploy.sh signs in to ghcr.io with this job's token, as the VM does
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,6 +122,10 @@ jobs:
       - name: Smoke-test and measure the production stack
         run: deploy/smoke/smoke.sh chitthi-api:ci chitthi-migrate:ci chitthi-web:ci
       - name: Deploy, re-deploy, a broken deploy that rolls itself back, explicit rollback
+        env:
+          # The repo is private: the first deploy fetches its files through the API with this job's
+          # own short-lived token, exactly as the VM does with the deploy workflow's.
+          CHITTHI_TEST_GITHUB_TOKEN: ${{ github.token }}
         run: deploy/host/test-deploy.sh
 
   perf:

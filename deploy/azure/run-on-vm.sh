@@ -8,6 +8,10 @@
 #   deploy/azure/run-on-vm.sh deploy/host/backup.sh selftest
 #
 # VM_RG and VM_NAME choose the VM (default apps-host / apps-vm, as setup.sh creates it).
+# RUN_ON_VM_GITHUB_TOKEN, if set (the deploy workflow's own GITHUB_TOKEN), reaches the script as
+# CHITTHI_GITHUB_TOKEN, exported inside the wrapper: never an argument, never echoed. The repo is
+# private, and deploy.sh and edge.sh use it to fetch their files and images. It is revoked when
+# the workflow job ends, so the copy Run Command keeps on the VM (root-only) is dead minutes later.
 #
 # Why not plain `az vm run-command invoke --parameters`: it reports success whatever the script's
 # exit code, and on Linux it may hand name=value parameters over as environment variables rather
@@ -28,6 +32,9 @@ for a in "$@"; do
   [[ $a =~ ^[A-Za-z0-9@._:/=+-]+$ ]] || die "argument '$a' has characters this refuses to pass"
 done
 
+token=${RUN_ON_VM_GITHUB_TOKEN:-}
+[[ -z $token || $token =~ ^gh[a-z]_[A-Za-z0-9_]+$ ]] || die "RUN_ON_VM_GITHUB_TOKEN is not a GitHub token"
+
 delim=END_OF_SCRIPT_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 grep -qF "$delim" "$script" && die "the script contains the wrapper's delimiter"
 payload=$(mktemp)
@@ -41,6 +48,7 @@ trap 'rm -f "$payload"' EXIT
   cat "$script"
   [[ -z $(tail -c 1 "$script") ]] || echo
   echo "$delim"
+  [[ -z $token ]] || echo "CHITTHI_GITHUB_TOKEN=$token; export CHITTHI_GITHUB_TOKEN"
   echo "bash \"\$f\" $* 2>&1"
   echo 'rc=$?'
   echo 'rm -f "$f"'

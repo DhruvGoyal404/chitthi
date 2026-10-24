@@ -3,7 +3,9 @@
 # deploy/host/bootstrap.sh, with the images CI just built, secrets from throwaway files and the
 # edge's internal CA. A second app's site file sits next to Chitthi's the whole time, and must come
 # out byte-identical and still served, as must the edge's own files.
-#   1. deploy (first release: nothing to roll back to)
+#   1. deploy (first release: nothing to roll back to). With CHITTHI_TEST_GITHUB_TOKEN (CI's own
+#      token), the edge install and this deploy fetch their files through the GitHub API and sign
+#      in to ghcr.io, as on the VM, where the repo is private
 #   2. the same release again (converges, keeps the rollback point)
 #   3. a release whose API exits at once: must fail, roll itself back, previous release serving
 #   4. a release whose site file is broken: must fail before changing anything
@@ -26,9 +28,12 @@ for name in google-client-id google-client-secret github-client-id github-client
 done
 
 hooks=(CHITTHI_TEST_CONFIG_DIR="$repo" CHITTHI_TEST_SECRETS_DIR="$secrets" CHITTHI_TEST_CACERT="$ca")
+token=()
+[[ -n ${CHITTHI_TEST_GITHUB_TOKEN:-} ]] && token=(CHITTHI_GITHUB_TOKEN="$CHITTHI_TEST_GITHUB_TOKEN")
+extra=() # set for one release at a time
 run() { sudo env "${hooks[@]}" "$repo/deploy/host/deploy.sh" "$@"; }
 release() { # <api tag> [config dir]
-  sudo env "${hooks[@]}" ${2:+CHITTHI_TEST_CONFIG_DIR="$2"} "$repo/deploy/host/deploy.sh" deploy \
+  sudo env "${hooks[@]}" "${extra[@]}" ${2:+CHITTHI_TEST_CONFIG_DIR="$2"} "$repo/deploy/host/deploy.sh" deploy \
     "sha=$sha" vault=ci-vault "api=chitthi-api:$1" migrate=chitthi-migrate:ci web=chitthi-web:ci     storage=cistorage container=chitthi-backups r2_bucket=chitthi-backups
 }
 current_api() { sudo grep -h '^CHITTHI_API_IMAGE=' /srv/chitthi/.env | cut -d= -f2-; }
@@ -36,7 +41,7 @@ edge_files() { sudo sha256sum /srv/edge/sites/other.caddy /srv/edge/Caddyfile /s
 other_site() { sudo curl -fsS --max-time 5 --cacert "$ca" --resolve other.example.test:443:127.0.0.1 https://other.example.test/; }
 
 # The edge, installed the way the host does it, then a second app's site file and its reload.
-sudo env CHITTHI_TEST_CONFIG_DIR="$repo" "$repo/deploy/host/edge.sh" "sha=$sha" acme_email=ci@example.com acme_ca=local
+sudo env CHITTHI_TEST_CONFIG_DIR="$repo" "${token[@]}" "$repo/deploy/host/edge.sh" "sha=$sha" acme_email=ci@example.com acme_ca=local
 printf 'other.example.test {\n\trespond "the other app"\n}\n' | sudo tee /srv/edge/sites/other.caddy >/dev/null
 sudo docker compose -p edge --project-directory /srv/edge exec -T caddy \
   caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address unix//run/caddy/admin.sock
@@ -45,8 +50,17 @@ for _ in $(seq 1 20); do [[ $(other_site 2>/dev/null) == 'the other app' ]] && b
 before=$(edge_files)
 echo "ok   0. edge installed; a second app's site file is served next to where Chitthi's will go"
 
-release ci
-echo "ok   1. first deploy"
+extra=("${token[@]}")
+out=$(release ci) || { echo "$out"; fail "the first deploy failed"; }
+extra=()
+echo "$out"
+if [[ ${#token[@]} -gt 0 ]]; then
+  grep -qF 'configuration fetched through the GitHub API' <<<"$out" || fail "the deploy did not fetch through the API"
+  grep -qF 'signed in to ghcr.io' <<<"$out" || fail "the deploy did not sign in to the registry"
+  echo "ok   1. first deploy, its files fetched through the GitHub API with a short-lived token, signed in to ghcr.io"
+else
+  echo "ok   1. first deploy (no token: local files)"
+fi
 release ci
 [[ $(current_api) == chitthi-api:ci ]] || fail "re-deploy changed the release"
 echo "ok   2. re-deploy of the same release"

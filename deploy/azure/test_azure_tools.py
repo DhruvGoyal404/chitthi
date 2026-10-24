@@ -139,6 +139,27 @@ class RunOnVm(unittest.TestCase):
             self.assertEqual(r.returncode, 1)
             self.assertIn("refuses to pass", r.stderr)
 
+    def test_the_github_token_arrives_as_an_environment_variable_only(self):
+        token = "ghs_" + "A1b2" * 9
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "az"), "w", newline="\n") as f:
+                f.write(FAKE_AZ)
+            os.chmod(os.path.join(tmp, "az"), 0o755)
+            with open(os.path.join(tmp, "s.sh"), "w", newline="\n") as f:
+                f.write('[ "$CHITTHI_GITHUB_TOKEN" = "%s" ] && echo token-arrived\necho "args: $*"\n' % token)
+            env = {**os.environ, "RUN_ON_VM_GITHUB_TOKEN": token}
+            r = subprocess.run([shutil.which("bash"), os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-on-vm.sh"),
+                                os.path.join(tmp, "s.sh"), "deploy"], capture_output=True, text=True,
+                               env={**env, "PATH": tmp + os.pathsep + env["PATH"]})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("token-arrived", r.stdout)
+            self.assertIn("args: deploy", r.stdout)
+            self.assertNotIn(token, r.stdout + r.stderr)
+            env["RUN_ON_VM_GITHUB_TOKEN"] = "not a token; reboot"
+            r = subprocess.run([shutil.which("bash"), os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-on-vm.sh"),
+                                os.path.join(tmp, "s.sh")], capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

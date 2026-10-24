@@ -40,13 +40,26 @@ flock -w 120 9 || die "another edge or app deploy is holding the edge"
 work=$(mktemp -d /run/edge.XXXXXX)
 trap 'rm -rf -- "$work"' EXIT
 
+# The repo is private: as in deploy.sh, the workflow's short-lived GITHUB_TOKEN (revoked when its
+# job ends) arrives in CHITTHI_GITHUB_TOKEN and goes only into a 0600 header file. Without it the
+# files are fetched anonymously (a public repo).
+if [[ -n ${CHITTHI_GITHUB_TOKEN:-} ]]; then
+  [[ $CHITTHI_GITHUB_TOKEN =~ ^gh[a-z]_[A-Za-z0-9_]+$ ]] || die "CHITTHI_GITHUB_TOKEN is not a GitHub token"
+  printf 'Authorization: Bearer %s\n' "$CHITTHI_GITHUB_TOKEN" > "$work/gh-auth"
+fi
+unset CHITTHI_GITHUB_TOKEN
 for f in compose.yaml Caddyfile; do
-  if [[ -n $TEST_CONFIG_DIR ]]; then
+  if [[ -n $TEST_CONFIG_DIR && ! -f $work/gh-auth ]]; then
     cp "$TEST_CONFIG_DIR/deploy/edge/$f" "$work/$f"
+  elif [[ -f $work/gh-auth ]]; then
+    curl -fsSL --proto '=https' --max-time 30 -o "$work/$f" -H @"$work/gh-auth" -H 'Accept: application/vnd.github.raw' \
+      "https://api.github.com/repos/$REPO/contents/deploy/edge/$f?ref=${arg[sha]}" || die "could not fetch deploy/edge/$f"
   else
-    curl -fsSL --proto '=https' --max-time 30 -o "$work/$f" "https://raw.githubusercontent.com/$REPO/${arg[sha]}/deploy/edge/$f"
+    curl -fsSL --proto '=https' --max-time 30 -o "$work/$f" "https://raw.githubusercontent.com/$REPO/${arg[sha]}/deploy/edge/$f" \
+      || die "could not fetch deploy/edge/$f"
   fi
 done
+rm -f "$work/gh-auth"
 printf 'ACME_EMAIL=%s\nEDGE_CA_OPTION=%s\nEDGE_DATA=/data/edge\nEDGE_UID=%s\n' \
   "${arg[acme_email]}" "$ca_option" "$EDGE_UID" > "$work/.env"
 chmod 0600 "$work/.env"

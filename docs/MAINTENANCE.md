@@ -94,9 +94,9 @@ The `<6 hex>` suffix comes from the subscription id, so every run finds the same
 8. **The edge,** once DNS resolves: `bash deploy/azure/run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=<you@…>`. To test certificate issuance first without using up Let's Encrypt's limits, add `acme_ca=staging`. Re-run without it before the first deploy: the deploy's smoke test needs a trusted certificate.
 9. **GitHub:**
    - Create the environment `production`, with deployments allowed from `main` only.
-   - Set the variables `setup.sh infra` printed: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `VM_RG`, `VM_NAME`, `KEY_VAULT`, `BACKUP_ACCOUNT`, `BACKUP_CONTAINER`, `R2_BUCKET`.
+   - Set the variables `setup.sh infra` printed: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `VM_RG`, `VM_NAME`, `KEY_VAULT`, `BACKUP_ACCOUNT`, `BACKUP_CONTAINER`, `R2_BUCKET`, `ACME_EMAIL`. Put them on the environment, not the repository: only the deploy job can read them. Then one repository variable, `DEPLOY_ENABLED=true`, switches the workflow on (a job's condition can't see environment variables).
    - None of these are secrets. With OIDC there is no stored credential.
-10. **The first deploy,** from the deploy workflow.
+10. **The first deploy:** Actions → Deploy → Run workflow (from `main`, action `deploy`). After that, every push to `main` that passes CI deploys itself.
 11. **Prove the backups are append-only** with the VM's real credentials: `bash deploy/azure/run-on-vm.sh deploy/host/backup.sh selftest`. It must pass every line.
 12. **Go-live gate:**
     - an alert email arrives;
@@ -187,10 +187,31 @@ bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh rollback
 bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh smoke
 ```
 
+**The deploy workflow** ([`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)):
+- **When it runs:**
+  - after CI passes on a push to `main`;
+  - or by hand from Actions → Deploy, with the action `deploy`, `rollback` or `smoke`.
+- **The build job:**
+  - builds the three images at exactly the CI-tested commit;
+  - runs `scripts/check-images.sh` on them;
+  - pushes them to GHCR and passes their `@sha256` references on.
+- **The deploy job** runs under the `production` environment (deployments from `main` only):
+  - It signs in to Azure as `chitthi-deploy` by OIDC. No credential is stored anywhere, and that identity can only use Run Command on the VM.
+  - It runs `edge.sh` (a no-op unless `deploy/edge` changed), then `deploy.sh`.
+  - It then runs [`deploy/azure/public-check.sh`](../deploy/azure/public-check.sh) from the internet. It checks health, at least 14 days left on the certificate, the headers, the redirect, the Origin refusals, and that ports 22, 5432, 5435, 8082 and 5175 are closed.
+  - The check runs after a failed deploy too, so the log shows what the rolled-back site serves.
+- **The repo and images are private.**
+  - The deploy job hands the VM its own `GITHUB_TOKEN` (contents:read, packages:read) through `run-on-vm.sh`, as an environment variable, never an argument.
+  - `deploy.sh` and `edge.sh` use it for the GitHub contents API and a throwaway Docker login under their scratch folder.
+  - GitHub revokes the token when the job ends, so the copy Run Command keeps on the VM (root-only) is dead within minutes.
+  - CI exercises this path on every push: test-deploy's first deploy fetches through the API and signs in to ghcr.io with CI's own token.
+- **The rest:** one deploy at a time, and a newer commit waits for the running one. Rollback is `deploy.sh rollback` (images only, see below).
+
 **A deploy, in order:**
 1. **Lock.** One deploy at a time (`flock`).
-2. **Configuration at that exact commit.** The compose and Caddy files come from
-   `raw.githubusercontent.com/DhruvGoyal404/chitthi/<sha>/…`, and the compose file is validated.
+2. **Configuration at that exact commit.** The compose and Caddy files come from the GitHub
+   contents API at `<sha>`, with the workflow's short-lived token (anonymously from
+   `raw.githubusercontent.com` if there is none), and the compose file is validated.
    Images are accepted only as `ghcr.io/dhruvgoyal404/chitthi-*@sha256:…`.
 3. **Secrets from Key Vault**, read with the VM's managed identity. The deploy fetches a token from
    the metadata service, which only root can reach.

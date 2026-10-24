@@ -489,7 +489,7 @@ Next (docs/MAINTENANCE.md, "Azure setup"):
        AZURE_TENANT_ID=$TENANT
        AZURE_SUBSCRIPTION_ID=$SUB
        VM_RG=$HOST_RG  VM_NAME=$VM
-       KEY_VAULT=$KV  BACKUP_ACCOUNT=$SA  BACKUP_CONTAINER=$CONTAINER  R2_BUCKET=<your bucket>
+       KEY_VAULT=$KV  BACKUP_ACCOUNT=$SA  BACKUP_CONTAINER=$CONTAINER  R2_BUCKET=<your bucket>  ACME_EMAIL=$1
   6. After the first deploy: bash deploy/azure/run-on-vm.sh deploy/host/backup.sh selftest
 EOF
 }
