@@ -84,7 +84,7 @@ replaces a stored secret.
 
 | Resource group | What | Settings |
 |---|---|---|
-| `apps-host` (shared by both apps) | VM `apps-vm` | B2ats v2, Ubuntu 24.04 (the newest image at least 14 days old), Trusted Launch, system identity. Azure requires an admin login, so it gets a key whose private half is deleted on the spot: there is no SSH, by design. Boot diagnostics are on, for the Serial Console. |
+| `apps-host` (shared by both apps) | VM `apps-vm` | B2ats v2, Ubuntu 24.04 from a pinned image URN, checked to exist in the region ("The VM image"), Trusted Launch, system identity. Azure requires an admin login, so it gets a key whose private half is deleted on the spot: there is no SSH, by design. Boot diagnostics are on, for the Serial Console. |
 | | Network | `apps-vm-nsg` allows TCP 80 and 443 from the Internet, nothing else. `apps-vm-ip` is a static Standard IPv4. No IPv6. |
 | | Disks | `disks=premium` (default): OS and data disk `apps-vm-data` are both 64 GiB Premium SSD (P6). `disks=standard`: a 32 GiB E4 OS disk and a 64 GiB E6 data disk (Standard SSD). See "What it costs". The data disk sits at LUN 0, with a delete lock. |
 | | Alerts | Action group `ops-email` sends to your address. Metric alerts: the VM unavailable, under 100 MiB available memory for 15 minutes, CPU credits under 30. Activity log alerts: the VM's resource health, and any role assignment written in the subscription. |
@@ -263,6 +263,23 @@ What protects deploys now:
   - An empty group holds nothing to lose. The preflight refuses a non-empty one, and never deletes anything itself.
 - **Latency:** chat traffic from India now crosses to Kuala Lumpur. Expect roughly 60–100 ms round trip from north India, against roughly 25–45 ms to Central India. That's an estimate: measure it after go-live with `curl -o /dev/null -sw '%{time_connect}\n' https://chitthi.dhruvgoyal.tech/api/health`. A chat app tolerates this well: messages carry their own sequence numbers, and the UI updates optimistically.
 - **Data location:** messages, files and the primary backups live in Malaysia West, and the second backup copy in Cloudflare R2 (Asia-Pacific). Keep any privacy text that names a data location in step.
+
+### The VM image
+
+The VM is created from a pinned image URN, like a container digest. The default is
+`Canonical:ubuntu-24_04-lts:server:24.04.202610220`, set in `setup.sh` (`DEFAULT_IMAGE`); pass `image=<URN>` to override it.
+
+- **The pin is per region.** Canonical's image versions reach regions at different times, and the version list can disagree with the region.
+  - The second go-live attempt chose `24.04.202610090` from `az vm image list`, which `az vm image show` couldn't find in `malaysiawest`.
+  - So the preflight checks the exact URN with `az vm image show --location <region>`, the lookup VM creation itself does.
+  - If the image is missing, the preflight stops before the prompt and prints the region's three newest versions.
+- **Under 14 days old is allowed, with a note.** `202610220` was published 2026-10-22, younger than the 14-day supply-chain rule. Every version present in `malaysiawest` on 2026-10-24 was, and the only older candidate wasn't actually there. The preflight reports the age and goes ahead, because the pin is a deliberate choice. Security updates arrive through unattended-upgrades from the first boot either way.
+- **The pin only matters when the VM is created.** Afterwards the OS is updated in place ("Updates"). Bump it only before building a VM (a rebuild, a new LTS), and choose a version at least 14 days old when the region has one:
+  ```
+  az vm image list --location malaysiawest --publisher Canonical --offer ubuntu-24_04-lts --sku server --all --query '[].urn' -o tsv | sort | tail -n 5
+  az vm image show --location malaysiawest --urn <one of them>   # must succeed in the region
+  ```
+  Then update `DEFAULT_IMAGE` in `setup.sh` (or pass `image=`).
 
 ### What it costs
 
@@ -637,7 +654,7 @@ Everything below emails you. Each row says what it means and where to start; "In
 | Base images: `node`, `alpine`, `caddy`, `postgres` | Pick a version published at least 14 days ago and take its digest (`docker buildx imagetools inspect <image>:<tag>`). Replace it in `api/Dockerfile`, `web/Dockerfile`, `deploy/chitthi/compose.yaml` (Postgres) and `deploy/edge/compose.yaml` (the edge Caddy), and keep `.nvmrc` in step with Node. Push: CI builds, smoke-tests and measures. The deploy ships the app. For the edge, also run `run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=…` | You |
 | Postgres minor (18.x) | A new image digest in `deploy/chitthi/compose.yaml`; the deploy restarts the database on it | You |
 | Postgres major (18 → 19) | Not in place: the data directory format changes. Take a backup (`run-on-vm.sh deploy/host/backup.sh run`). Change the image. Then, in one script through Run Command: stop the stack and move `/data/chitthi/pg` aside. Deploy, which starts an empty cluster on the new version. Then `backup.sh restore confirm=chitthi.dhruvgoyal.tech`. Delete the old directory a week later | You, in a quiet hour |
-| Ubuntu's next LTS | Not in place. Build a new VM: delete the VM (the data disk stays, locked), run `setup.sh infra` with the newer image, then bootstrap, edge and deploy. The data disk keeps the data | You, every couple of years |
+| Ubuntu's next LTS | Not in place. Build a new VM: delete the VM (the data disk stays, locked), run `setup.sh infra image=<the new LTS URN>` (check it exists in the region, "The VM image"), then bootstrap, edge and deploy. The data disk keeps the data | You, every couple of years |
 
 ## Disk growth
 

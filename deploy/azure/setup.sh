@@ -3,7 +3,7 @@
 # in as themselves (they must be Owner of the subscription):
 #
 #   git clone https://github.com/DhruvGoyal404/chitthi && cd chitthi
-#   bash deploy/azure/setup.sh infra alert_email=<address> [region=malaysiawest] [disks=premium|standard]
+#   bash deploy/azure/setup.sh infra alert_email=<address> [region=malaysiawest] [disks=premium|standard] [image=<urn>]
 #                                    [budget=<amount>] [subscription=<id>]
 #   bash deploy/azure/setup.sh secrets      # generates or asks for each missing Key Vault secret
 #   bash deploy/azure/setup.sh rotate name=<secret>   # a new value for one (docs/MAINTENANCE.md)
@@ -46,7 +46,10 @@ BACKUP_ROLE="Blob create-only writer"
 RUNCMD_ROLE="VM Run Command operator"
 KEEP_DAYS=35
 SOFT_DELETE_DAYS=14
-MIN_IMAGE_AGE_DAYS=14 # the supply-chain rule, applied to the VM image too
+MIN_IMAGE_AGE_DAYS=14 # the supply-chain rule: a younger pinned image is reported (preflight)
+# The VM image, pinned like a container digest. Versions roll out per region: this one is present
+# in malaysiawest (checked 2026-10-24). Override with image=<publisher:offer:sku:version>.
+DEFAULT_IMAGE=Canonical:ubuntu-24_04-lts:server:24.04.202610220
 METRIC_ALERTS=(vm-unavailable vm-low-memory vm-cpu-credits-low)
 ACTIVITY_ALERTS=(vm-resource-health role-assignment-changed)
 SECRETS=(
@@ -75,6 +78,9 @@ done
 if ! command -v az >/dev/null || ! command -v jq >/dev/null; then die "run this in Azure Cloud Shell (Bash): it needs az and jq"; fi
 LOCATION=${arg[region]:-$DEFAULT_REGION}
 [[ $LOCATION =~ ^[a-z0-9]+$ ]] || die "region= must be an Azure region name, such as malaysiawest"
+IMAGE_URN=${arg[image]:-$DEFAULT_IMAGE}
+[[ $IMAGE_URN =~ ^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+:[A-Za-z0-9._-]+:[0-9]+(\.[0-9]+)+$ ]] \
+  || die "image= must be a full URN with an exact version, publisher:offer:sku:version (never 'latest')"
 # premium: two P6 (64 GiB Premium SSD), the disks the 12-month free allowance has listed.
 # standard: E4 (32 GiB) for the OS and E6 (64 GiB) for data, Standard SSD: never free, but less
 # than half of P6's price once nothing is free (docs/MAINTENANCE.md, "What it costs").
@@ -171,7 +177,7 @@ infra() {
 
 # Read-only checks, before anything is created: each failure names its fix.
 preflight() {
-  local allowed sku restrictions zones rg loc n cutoff
+  local allowed sku restrictions zones rg loc n
   log "preflight: region $LOCATION, $VM_SIZE, $DISK_SKU disks"
 
   # 1. The subscription's allowed-locations policy (Azure for Students has one), from every policy
@@ -216,14 +222,25 @@ preflight() {
     die "resource group $rg exists in $loc and holds $n resources; this won't build across regions (docs/MAINTENANCE.md, \"Region\")"
   done
 
-  # 4. The VM image: the newest Ubuntu 24.04 published at least MIN_IMAGE_AGE_DAYS ago (versions
-  #    are 24.04.YYYYMMDDn), in this region.
+  # 4. The VM image: the pinned URN must exist IN THIS REGION, checked with exactly the lookup VM
+  #    creation does (image versions roll out region by region; `vm image list` once offered a
+  #    version that `vm image show` couldn't find in malaysiawest). Only when the VM doesn't exist.
   if ! exists vm show -g "$HOST_RG" -n "$VM"; then
-    cutoff=$(date -u -d "-$MIN_IMAGE_AGE_DAYS days" +%Y%m%d)
-    IMAGE_VERSION=$(v vm image list --location "$LOCATION" --publisher Canonical --offer ubuntu-24_04-lts --sku server --all --query '[].version' \
-      | awk -F. -v cutoff="$cutoff" 'substr($3, 1, 8) <= cutoff' | sort -t. -k3,3n | tail -n 1)
-    [[ -n $IMAGE_VERSION ]] || die "no Ubuntu 24.04 image at least $MIN_IMAGE_AGE_DAYS days old in $LOCATION"
-    log "image: Canonical:ubuntu-24_04-lts:server:$IMAGE_VERSION"
+    local publisher offer image_sku version day newest
+    IFS=: read -r publisher offer image_sku version <<<"$IMAGE_URN"
+    if ! exists vm image show --location "$LOCATION" --urn "$IMAGE_URN"; then
+      newest=$(az rest --method get --only-show-errors --output tsv --query '[].name' \
+        --url "https://management.azure.com$SUB_SCOPE/providers/Microsoft.Compute/locations/$LOCATION/publishers/$publisher/artifacttypes/vmimage/offers/$offer/skus/$image_sku/versions?api-version=2024-07-01" 2>/dev/null \
+        | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 3 | sed "s/^/$publisher:$offer:$image_sku:/" | paste -sd' ' -)
+      die "image $IMAGE_URN is not in $LOCATION. Newest there: ${newest:-none found}. Pass image=<one of them> (docs/MAINTENANCE.md, \"The VM image\")"
+    fi
+    # Ubuntu versions are 24.04.YYYYMMDDn. The pin is your choice, so an image younger than the
+    # supply-chain rule's 14 days is reported, not refused (a region may have nothing older).
+    day=$(sed -n 's/^[0-9]*\.[0-9]*\.\([0-9]\{8\}\).*/\1/p' <<<"$version")
+    if [[ -n $day ]] && (( ($(date -u +%s) - $(date -u -d "$day" +%s)) / 86400 < MIN_IMAGE_AGE_DAYS )); then
+      log "note: $IMAGE_URN was published $day, under the $MIN_IMAGE_AGE_DAYS-day rule; using it because it is pinned"
+    fi
+    log "image: $IMAGE_URN (present in $LOCATION)"
   fi
   log "preflight passed"
 }
@@ -251,14 +268,14 @@ create_vm() {
     --resource-type Microsoft.Compute/disks --notes "Chat history and media live here"
 
   if ! exists vm show -g "$HOST_RG" -n "$VM"; then
-    local keydir version=${IMAGE_VERSION:?preflight picks the image}
-    log "creating $VM ($VM_SIZE, Canonical:ubuntu-24_04-lts:server:$version)"
+    local keydir
+    log "creating $VM ($VM_SIZE, $IMAGE_URN)"
     # Azure insists on an admin login. It gets a key whose private half is deleted right here,
     # and the host disables SSH anyway: access is Run Command only.
     keydir=$(mktemp -d)
     ssh-keygen -q -t ed25519 -N '' -C no-login -f "$keydir/key"
     q vm create -g "$HOST_RG" -n "$VM" -l "$LOCATION" --size "$VM_SIZE" \
-      --image "Canonical:ubuntu-24_04-lts:server:$version" \
+      --image "$IMAGE_URN" \
       --security-type TrustedLaunch --enable-secure-boot true --enable-vtpm true \
       --admin-username "$ADMIN_USER" --authentication-type ssh --ssh-key-values "$(cat "$keydir/key.pub")" \
       --assign-identity '[system]' \
