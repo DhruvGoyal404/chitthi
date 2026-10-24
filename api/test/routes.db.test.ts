@@ -4,6 +4,7 @@ import { afterAll, describe, expect, inject, it } from 'vitest';
 import { as, signIn, testApp } from './apphelpers.js';
 import { appPool } from './dbhelpers.js';
 import { WEB_ORIGIN } from './helpers.js';
+import { MAX_ISSUES } from '../src/errors.js';
 
 const apiUrl = inject('apiDbUrl');
 
@@ -84,6 +85,26 @@ describe.skipIf(!apiUrl)('REST API (sends, edits, deletes, sync reads)', () => {
     expect((await as(app, x).post(`/conversations/${gid}/leave`)).body).toEqual({ leftSeq: 4 });
     const found = await as(app, owner).get(`/users/${x.handle.toUpperCase()}`);
     expect(found.body.user).toMatchObject({ id: x.id, handle: x.handle });
+  });
+
+  // GHSA-mrhx-c7xc-m3w5: zod validated every element of an over-long array before its length,
+  // so a 100 KB body of 50,000 bad ids made 50,000 issues (+28 MiB heap, a 4 MB answer).
+  it('refuses an over-long array by its length, with a small answer', async () => {
+    const { a, id } = await dm();
+    const many = Array<number>(50_000).fill(1);
+    for (const res of [
+      await as(app, a).post('/conversations', { title: 'Huge', memberIds: many }),
+      await as(app, a).post(`/conversations/${id}/messages`, { clientMsgId: randomUUID(), body: 'x', attachmentIds: many }),
+    ]) {
+      expect(res.status).toBe(400);
+      expect(res.body.error.issues).toHaveLength(1);
+      expect(res.body.error.issues[0].message).toMatch(/expected array to have <=/);
+      expect(JSON.stringify(res.body).length).toBeLessThan(500);
+    }
+    // Wrong elements in an array within its bound: at most MAX_ISSUES come back.
+    const wrong = await as(app, a).post('/conversations', { title: 'Wrong', memberIds: Array<number>(200).fill(1) });
+    expect(wrong.status).toBe(400);
+    expect(wrong.body.error.issues).toHaveLength(MAX_ISSUES);
   });
 
   it('rejects bad input, strangers, missing sessions and foreign origins', async () => {

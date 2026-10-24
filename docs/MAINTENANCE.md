@@ -355,7 +355,31 @@ two buckets. It runs:
 
 The Azure REST calls and R2 permissions themselves are proven on the VM by `backup.sh selftest`.
 
+## Pending dependency upgrades
+
+A high or critical advisory whose fix is younger than the 14-day release rule gets a dated entry
+in [`audit-exceptions.json`](../audit-exceptions.json). CI's audit
+([`scripts/audit.sh`](../scripts/audit.sh)) treats it as excepted until the entry expires, then
+fails with "upgrade". Each entry expires one day after its fix becomes installable, which leaves
+a day to land the upgrade before CI turns red.
+
+| Advisory | Severity | Exploitable in Chitthi? | Mitigation until the upgrade | Upgrade (own commit) | Exception expires |
+|---|---|---|---|---|---|
+| [GHSA-27r3-jxmh-p828](https://github.com/advisories/GHSA-27r3-jxmh-p828), body-parser ≤ 2.3.0 (through Express 5.2.1) | High | **Yes, before the mitigation:** one unauthenticated request with a gzipped body plus trailing bytes crashed the API. Parsing runs before routing and before the session check. | `express.json({ inflate: false })`: compressed request bodies get 415, before any decompression (`e3638eb`). No client sends them. Test: `api/test/process.test.ts`, which crashed the real process before. | body-parser 2.4.0 (published 2026-10-22 11:39 UTC), **on 2026-11-06**: `npm update body-parser --before=2026-10-23`. Express's `^2.2.1` range allows it; check `npm ls body-parser` shows 2.4.0. Keep `inflate: false`. | 2026-11-07 |
+| [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5), zod ≤ 4.6.5 | High | **Yes, before the mitigation, for signed-in users:** `.max()` did not stop zod validating every element first. One 98 KB body to `POST /conversations` or the send route meant 50,001 issues, +28 MiB of heap, 116–164 ms of CPU and a 4.3 MB error response. Three or four at once could exhaust the API's 96 MiB heap. | Arrays are length-checked before any element (`boundedArray` in `api/src/routes.ts`): the same body now costs one issue, 2.4 MiB and 11 ms. Error responses carry at most 10 issues (`MAX_ISSUES`). Test: `api/test/routes.db.test.ts`. | zod 4.6.6 (published 2026-10-11 16:18 UTC), **on 2026-10-26**: `npm install -w api --save-exact --before=2026-10-12 zod@4.6.6`. That date excludes 4.6.7, which arrived on 10-12. Check `npm ls zod` shows one copy, 4.6.6. Keep `boundedArray` and the cap. | 2026-10-27 |
+
+After each upgrade: the full gate, then remove the entry from `audit-exceptions.json` in the same
+commit. Until then, the audit prints a note for any exception whose advisory has disappeared.
+
 ## Memory budget
+
+**The go-live questions, answered** (commits `0cd5008` and `325b6e4`; the tables below):
+
+| Question | Answer |
+|---|---|
+| (a) The max-size photo, at production settings | Production runs `IMAGE_MAX_PIXELS=24000000` and `IMAGE_CONCURRENCY=1` ([compose.yaml](../deploy/chitthi/compose.yaml)). The load test makes its photo at exactly the running API's `IMAGE_MAX_PIXELS`: 6000×4000, 9.3 MB. It uploads one, then two at once, then one a pixel over (refused, 413). |
+| (b) The API's heap cap, and memory under load | The cap is `--max-old-space-size=96`; V8 reports a 99 MiB limit inside the container. The API's anon + kernel memory, which can't be dropped, peaks at **155 MiB** with two max-size photos at once (96 with one). That's 61 % of its **256 MiB** `mem_limit`. `memory.peak`, page cache included, is 112 MiB (157 locally). No OOM kills. CI fails above 90 % of the limit. |
+| (c) The edge Caddy, and the busy total for both apps | The edge measured **16 MiB** steady and **24 MiB** at peak, of 64. Both apps busy, with a max-size photo in flight: **≈ 699 MiB** of ≈ 900 (≈ 519 steady). |
 
 The VM has 1 GiB, of which roughly 900 MiB is visible to Linux; confirm with `free -m` when the
 VM exists. Every container has a `mem_limit`. A container that overruns its limit is OOM-killed

@@ -20,10 +20,15 @@ const uuid = z.uuid();
 const seq = z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const limit = z.coerce.number().int().min(1).max(MAX_PAGE).optional();
 
-const sendBody = z.object({ clientMsgId: uuid, body: z.string().nullish(), attachmentIds: z.array(z.string()).max(10).optional() });
+// The length is checked before any element: zod (≤ 4.6.5, GHSA-mrhx-c7xc-m3w5) validates every
+// element of an over-long array first, so 50,000 bad elements in a 100 KB body meant 50,000 issues
+// and +28 MiB of heap per request. The bound comes first, so that costs one issue.
+const boundedArray = <T extends z.ZodType>(item: T, max: number) => z.array(z.unknown()).max(max).pipe(z.array(item));
+
+const sendBody = z.object({ clientMsgId: uuid, body: z.string().nullish(), attachmentIds: boundedArray(z.string(), 10).optional() });
 const editBody = z.object({ body: z.string() });
 const directBody = z.object({ userId: uuid });
-const groupBody = z.object({ title: z.string(), memberIds: z.array(uuid).max(255).default([]) });
+const groupBody = z.object({ title: z.string(), memberIds: boundedArray(uuid, 255).default([]) });
 const addMemberBody = z.object({ userId: uuid, role: z.enum(['admin', 'member']).optional() });
 const readBody = z.object({ seq });
 const messagesQuery = z

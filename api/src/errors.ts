@@ -13,6 +13,9 @@ export class HttpError extends Error {
   }
 }
 
+/** At most this many validation issues go back to the client. */
+export const MAX_ISSUES = 10;
+
 export type ErrorBody = {
   error: { code: string; message: string; issues?: { path: string; message: string }[]; details?: Record<string, unknown> };
 };
@@ -46,7 +49,8 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, req, res, next) 
       error: {
         code: 'invalid_request',
         message: 'Request validation failed',
-        issues: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+        // A bounded list: the response must never grow with how wrong the input is.
+        issues: err.issues.slice(0, MAX_ISSUES).map((i) => ({ path: i.path.join('.'), message: i.message })),
       },
     };
   } else if (isClientParserError(err)) {
