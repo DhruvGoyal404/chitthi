@@ -127,6 +127,24 @@ jobs:
           # own short-lived token, exactly as the VM does with the deploy workflow's.
           CHITTHI_TEST_GITHUB_TOKEN: ${{ github.token }}
         run: deploy/host/test-deploy.sh
+      # As after enlarging the data disk in Azure: the loop file grows by half, then the script
+      # grows the mounted filesystem with the stack running.
+      - name: Grow the data disk while mounted
+        run: |
+          set -o pipefail
+          before=$(df -BM --output=size /data | tail -n 1 | tr -dc '0-9')
+          truncate -s 1536M "$RUNNER_TEMP/data-disk.img"
+          sudo losetup -c "$(findmnt -no SOURCE /data)"
+          sudo deploy/host/grow-data-disk.sh
+          after=$(df -BM --output=size /data | tail -n 1 | tr -dc '0-9')
+          (( after > before + 400 )) || { echo "/data did not grow: $before -> $after MiB"; exit 1; }
+          sudo docker compose -p chitthi --project-directory /srv/chitthi ps --status running --services | grep -qx api
+      - name: Host status report
+        run: |
+          set -o pipefail
+          sudo deploy/host/status.sh | tee "$RUNNER_TEMP/status.txt"
+          grep -q 'last-success: ' "$RUNNER_TEMP/status.txt"
+          grep -q 'chitthi-api-1' "$RUNNER_TEMP/status.txt"
 
   perf:
     # Timing-sensitive tests (npm run test:perf): their own job, so they can't make the main

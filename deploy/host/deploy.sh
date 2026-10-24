@@ -268,6 +268,14 @@ failed() {
 }
 
 app up -d --wait db || failed "Postgres did not become healthy"
+# POSTGRES_PASSWORD only applies when the cluster is first created, so the owner's password is set
+# from Key Vault on every deploy: rotating it is a new secret and a deploy. Through the container's
+# local socket, the statement on stdin (printf is a builtin), never on a command line. The API's
+# password is likewise set from Key Vault by the migrate job on every run.
+owner_password=$(sed -n 's/^POSTGRES_PASSWORD=//p' "$SRV/db.env")
+printf "ALTER ROLE chitthi PASSWORD '%s'" "$owner_password" | app exec -T db psql -X -q -v ON_ERROR_STOP=1 -U chitthi -d postgres >/dev/null \
+  || failed "could not set the database owner's password"
+unset owner_password
 running=$(app ps --status running --services)
 if grep -qx api <<<"$running"; then
   install -d -m 0700 "$DUMPS"

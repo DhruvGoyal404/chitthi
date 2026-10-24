@@ -7,6 +7,8 @@
 #   backup.sh drill     monthly: restore the newest backup into a scratch database and verify it
 #   backup.sh selftest  once, at setup: prove the VM's own credentials can create but not
 #                       overwrite or delete
+#   backup.sh restore confirm=<host> [manifest=latest|manifests/<UTC>.json] [from=azure|r2]
+#                       replace the live database and missing media from a backup (incidents)
 #
 # Every object is new and uniquely named, and nothing is ever overwritten or deleted from here:
 # - Azure: the VM's identity holds only blobs/read and blobs/add/action (create-only). Each upload
@@ -27,6 +29,9 @@ MEDIA=/data/chitthi/media
 STATE=/data/chitthi/backup-state
 STAGE=/data/chitthi/backup-stage
 AZ_VERSION=2023-11-03
+DISK_WARN_PCT=${CHITTHI_BACKUP_DISK_WARN_PCT:-80} # the nightly run alerts at this much of /data used
+DUMPS=/data/chitthi/pre-deploy # where deploy.sh keeps its dumps; a restore keeps one there too
+HOST=chitthi.dhruvgoyal.tech
 # CI only, never on the VM: secrets from files, and local folders standing in for the buckets.
 TEST=${CHITTHI_BACKUP_TEST_DIR:-}
 
@@ -75,6 +80,22 @@ secret() { # <name>
   fi
   [[ -n $v ]] || die "secret $1 is empty"
   printf '%s' "$v"
+}
+secret_optional() { # <name>: prints it, or returns 1 if there is no such secret
+  if [[ -n $TEST ]]; then [[ -s $TEST/secrets/$1 ]] && cat "$TEST/secrets/$1"; return; fi
+  secret chitthi-backup-age-recipient >/dev/null # makes sure the Key Vault header exists
+  curl -fsS --max-time 10 -H @"$work/kv-auth" "https://$VAULT.vault.azure.net/secrets/$1?api-version=7.4" 2>/dev/null | jq -er .value
+}
+
+# The private keys, into 0600 files on /run (tmpfs: memory), removed with $work. The current key,
+# plus the previous one while backups encrypted to it still exist (key rotation:
+# docs/MAINTENANCE.md, "Secret rotation"). Sets age_ids for `age -d "${age_ids[@]}"`.
+load_identities() {
+  secret chitthi-backup-age-identity > "$work/id-current"
+  age_ids=(-i "$work/id-current")
+  if secret_optional chitthi-backup-age-identity-previous > "$work/id-previous"; then
+    age_ids+=(-i "$work/id-previous")
+  fi
 }
 
 # --- Azure Blob, create-only. Uploads stream from disk (curl -T), one Put Blob per object.
@@ -208,7 +229,16 @@ run_backup() {
 
   echo "$ts" > "$STATE/last-success"
   rm -rf "$STAGE"
-  hc success "backup $ts: $name, $(grep -c . <<<"$keys" || true) media files"
+  # The disk alert rides on this check (Azure has no metric for a filesystem's free space): a full
+  # /data turns it red with the reason, though the backup itself succeeded.
+  local used
+  used=$(df --output=pcent /data | tail -n 1 | tr -dc '0-9')
+  if (( used >= DISK_WARN_PCT )); then
+    log "WARNING: /data is ${used}% full (docs/MAINTENANCE.md, \"Disk growth\")"
+    hc fail "backup $ts succeeded, but /data is ${used}% full: grow the data disk (docs/MAINTENANCE.md, Disk growth)"
+  else
+    hc success "backup $ts: $name, $(grep -c . <<<"$keys" || true) media files, /data ${used}% full"
+  fi
   log "done: $ts"
 }
 
@@ -216,7 +246,7 @@ run_backup() {
 run_drill() {
   if [[ -z $TEST ]]; then HC=$(secret chitthi-hc-drill-url); fi
   hc start
-  local manifest dump sha identity restored sample k want got
+  local manifest dump sha restored sample k want got
   manifest=$(az_list manifests/ | sort | tail -n 1)
   [[ -n $manifest ]] || die "no manifest in the backup container"
   az_get "$manifest" "$work/manifest.json"
@@ -228,10 +258,9 @@ run_drill() {
   [[ $(cut -d' ' -f1 "$work/dump.sha256") == "$sha" ]] || die "the dump's .sha256 object disagrees with the manifest"
   log "newest backup: $manifest, dump checksum verified"
 
-  # The private key, from Key Vault into memory only.
-  identity=$(secret chitthi-backup-age-identity)
+  load_identities
   psql_owner -d postgres -c 'DROP DATABASE IF EXISTS chitthi_restore' -c 'CREATE DATABASE chitthi_restore'
-  age -d -i <(printf '%s\n' "$identity") < "$work/dump.age" \
+  age -d "${age_ids[@]}" < "$work/dump.age" \
     | app exec -T db pg_restore -U chitthi -d chitthi_restore --no-owner --exit-on-error
 
   restored=$(psql_owner -d chitthi_restore -At -F ' ' -c \
@@ -252,11 +281,10 @@ run_drill() {
   while read -r k want; do
     [[ -n $k ]] || continue
     az_get "media/$k.age" "$work/m.age"
-    got=$(age -d -i <(printf '%s\n' "$identity") < "$work/m.age" | sha256sum | cut -d' ' -f1)
+    got=$(age -d "${age_ids[@]}" < "$work/m.age" | sha256sum | cut -d' ' -f1)
     [[ $got == "$want" ]] || die "media $k does not match its sha256 after decryption"
     checked=$((checked + 1))
   done <<<"$sample"
-  unset identity
   log "media: $checked sampled files decrypt to their recorded sha256"
 
   # The R2 copy holds the same dump, byte for byte.
@@ -290,9 +318,87 @@ run_selftest() {
   log "selftest passed: the VM can create, and cannot overwrite or delete, in both stores"
 }
 
+# =====================================================================================================
+# The live database and media back from a backup: after losing or corrupting the data disk
+# (docs/MAINTENANCE.md, "Incidents"). Replaces the live database, so it needs confirm=<hostname>.
+run_restore() {
+  local manifest=latest from=azure confirm='' kv dump sha restored r_messages r_attachments r_version keys k dst n=0 before='(none: there was no database)'
+  for kv in "$@"; do
+    case $kv in
+      manifest=*) manifest=${kv#*=} ;;
+      from=*) from=${kv#*=} ;;
+      confirm=*) confirm=${kv#*=} ;;
+      *) die "unknown argument '$kv'" ;;
+    esac
+  done
+  [[ $confirm == "$HOST" ]] || die "this replaces the live database and its files: pass confirm=$HOST"
+  [[ $from == azure || $from == r2 ]] || die "from= must be azure or r2"
+  if [[ $from == r2 ]]; then r2_env; fi
+  fetch() { if [[ $from == azure ]]; then az_get "$1" "$2"; else rclone copyto "$R2/$1" "$2"; fi; }
+  if [[ $manifest == latest ]]; then
+    if [[ $from == azure ]]; then manifest=$(az_list manifests/ | sort | tail -n 1)
+    else manifest=manifests/$(rclone lsf --files-only "$R2/manifests" | sort | tail -n 1); fi
+  fi
+  [[ $manifest =~ ^manifests/[0-9]{8}T[0-9]{6}Z\.json$ ]] || die "manifest= must be manifests/<UTC>.json or latest (got '$manifest')"
+
+  # Everything is fetched and checked before the live database is touched.
+  fetch "$manifest" "$work/manifest.json"
+  dump=$(jq -er .dump "$work/manifest.json")
+  sha=$(jq -er .sha256 "$work/manifest.json")
+  fetch "$dump" "$work/dump.age"
+  fetch "$dump.sha256" "$work/dump.sha256"
+  [[ $(sha256sum "$work/dump.age" | cut -d' ' -f1) == "$sha" ]] || die "the dump does not match its manifest's sha256"
+  [[ $(cut -d' ' -f1 "$work/dump.sha256") == "$sha" ]] || die "the dump's .sha256 object disagrees with the manifest"
+  load_identities
+  age -d "${age_ids[@]}" < "$work/dump.age" > /dev/null || die "the dump does not decrypt with the backup keys"
+  log "restoring $manifest from $from: dump checksum and decryption verified"
+
+  app stop api
+  # What's there now is kept, in case this restore was the mistake.
+  if psql_owner -d postgres -At -c "SELECT 1 FROM pg_database WHERE datname = 'chitthi'" | grep -qx 1; then
+    install -d -m 0700 "$DUMPS"
+    before=$DUMPS/chitthi-pre-restore-$(date -u +%Y%m%dT%H%M%SZ).dump
+    app exec -T db pg_dump -U chitthi -d chitthi -Fc > "$before" || die "could not dump the current database first; nothing was replaced"
+    log "the database as it was: $before"
+  fi
+  psql_owner -d postgres -c 'DROP DATABASE IF EXISTS chitthi WITH (FORCE)' -c 'CREATE DATABASE chitthi OWNER chitthi'
+  age -d "${age_ids[@]}" < "$work/dump.age" | app exec -T db pg_restore -U chitthi -d chitthi --no-owner --exit-on-error \
+    || die "pg_restore failed; the previous database is in $before"
+  restored=$(psql_owner -d chitthi -At -F ' ' -c \
+    'SELECT (SELECT count(*) FROM messages), (SELECT count(*) FROM attachments), (SELECT max(version) FROM schema_migrations)')
+  read -r r_messages r_attachments r_version <<<"$restored"
+  [[ $r_version == "$(jq -r .schema_version "$work/manifest.json")" ]] || die "restored schema version $r_version is not the manifest's"
+  (( r_messages >= $(jq -r .counts.messages "$work/manifest.json") )) || die "the restore has fewer messages than were counted"
+  log "database restored: schema $r_version, $r_messages messages, $r_attachments attachments"
+
+  # Media the manifest lists and the disk lacks: decrypted next to its place, then renamed into
+  # it, owned by the API's uid like the files it writes.
+  keys=$(jq -r '.media[]' "$work/manifest.json")
+  while read -r k; do
+    [[ $k =~ ^[0-9a-f]{32}$ ]] || continue
+    dst=$(media_path "$k")
+    [[ -f $dst ]] && continue
+    fetch "media/$k.age" "$work/m.age"
+    install -d -o 10010 -g 10010 -m 0700 "$(dirname "$(dirname "$dst")")" "$(dirname "$dst")"
+    age -d "${age_ids[@]}" < "$work/m.age" > "$dst.restoring" || die "media $k does not decrypt"
+    chown 10010:10010 "$dst.restoring" && chmod 0600 "$dst.restoring" && mv "$dst.restoring" "$dst"
+    n=$((n + 1))
+  done <<<"$keys"
+  rm -f "$work/m.age"
+  log "media: $n files restored, the rest were already on disk"
+
+  # The running release may be newer than the backup: its migrations bring the schema forward.
+  app run --rm migrate >/dev/null || die "the migrations failed after the restore"
+  app up -d --wait api || die "the API did not come back after the restore"
+  install -d -m 0700 "$STATE"
+  echo "$(date -u +%Y%m%dT%H%M%SZ) $manifest from $from" > "$STATE/last-restore"
+  log "restore complete: run 'deploy.sh smoke' to check the site"
+}
+
 case ${1:-} in
   run) run_backup ;;
   drill) run_drill ;;
   selftest) run_selftest ;;
-  *) die "usage: backup.sh run | drill | selftest" ;;
+  restore) shift; run_restore "$@" ;;
+  *) die "usage: backup.sh run | drill | selftest | restore confirm=$HOST [manifest=latest|manifests/<UTC>.json] [from=azure|r2]" ;;
 esac

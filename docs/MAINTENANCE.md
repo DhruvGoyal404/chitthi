@@ -1,8 +1,17 @@
 # Running Chitthi in production
 
-How the production deployment is built, run and repaired. This file grows with Phase 7: each
-piece adds its section when it lands (host setup, deploy and rollback, backups and restore,
-alerts, secret rotation, updates, disk growth, adding the second app, budget, incidents).
+How the production deployment is built, run and repaired.
+
+**Sections:**
+- **Layout:** what runs where.
+- **Inventory and access.**
+- **Setting it up:** Azure setup, then host setup.
+- **Running it:** deploy and rollback; backups; alerts.
+- **Looking after it:** secret rotation; updates; disk growth; adding the second app.
+- **Incidents:** when something breaks.
+- **Reference:** pending dependency upgrades; the memory budget. The budget in money is under "What it costs".
+
+Every command here runs from Azure Cloud Shell, in a clone of this repo.
 
 ## Layout
 
@@ -30,6 +39,37 @@ alerts, secret rotation, updates, disk growth, adding the second app, budget, in
   - prints the memory table.
 
   CI runs it on every push (the `images` job).
+
+## Inventory and access
+
+**Everything that exists, and where:**
+
+| What | Name | Where |
+|---|---|---|
+| VM | `apps-vm` (B2ats v2, Ubuntu 24.04) | Azure, resource group `apps-host`, Central India |
+| Public IPv4 (static) | `apps-vm-ip` | `apps-host`. DNS: `chitthi.dhruvgoyal.tech` A record |
+| Data disk | `apps-vm-data` (64 GiB P6, LUN 0, delete lock) → `/data` | `apps-host` |
+| Network security group | `apps-vm-nsg` (TCP 80 and 443 in) | `apps-host` |
+| Alerts and budget | `ops-email`, 3 metric alerts, 2 activity log alerts, budget `apps-host` | `apps-host` and the subscription |
+| Backup storage | `chitthibk<6 hex>`, container `backups` | Azure, resource group `chitthi` |
+| Secrets | Key Vault `chitthi-kv-<6 hex>` | `chitthi` |
+| Deploy identity | `chitthi-deploy` (OIDC from GitHub `main`) | `chitthi` |
+| Second backup copy | R2 bucket (`R2_BUCKET`), 30-day bucket lock | Cloudflare |
+| Backup monitoring | `chitthi-backup`, `chitthi-drill` | healthchecks.io |
+| Code, CI, images | `DhruvGoyal404/chitthi` (private), `ghcr.io/dhruvgoyal404/chitthi-{api,migrate,web}` | GitHub |
+| On the VM | `/srv/edge` (shared Caddy), `/srv/chitthi` (compose, env files, `deploys.log`, `bin/backup.sh`), `/data/chitthi/{pg,media,pre-deploy,backup-state}` | `apps-vm` |
+
+`setup.sh check` verifies the Azure half: settings, locks, and each identity's exact roles.
+
+**Access:**
+- **Normal: Run Command,** from Cloud Shell (`run-on-vm.sh <script>`) or the deploy workflow. It needs the VM's Run Command permission: your Owner role, or `chitthi-deploy`'s custom role.
+  - For a look around: `bash deploy/azure/run-on-vm.sh deploy/host/status.sh`.
+  - For anything else, put the commands in a small script file and run that.
+- **No SSH, ever:** sshd is disabled, the network security group has no port 22, and nobody holds the admin login's private key.
+- **Emergency: the Serial Console,** when the VM boots but Run Command doesn't answer.
+  - It needs boot diagnostics (on) and a password login, which doesn't exist until you make one: `az vm user update -g apps-host -n apps-vm -u rescue -p '<long random password>'`. That goes through the VM agent; if the agent is dead too, see "Incidents".
+  - Then use Portal → apps-vm → Serial console.
+  - Afterwards, `az vm user delete -g apps-host -n apps-vm -u rescue`.
 
 ## Azure setup
 
@@ -349,6 +389,7 @@ byte-identical to before, and the other site must still answer.
 | `chitthi-backup.timer` → `backup.sh run` | nightly, 20:30 UTC (02:00 IST), before the reboot window | Database dump, new media, manifest; to Azure Blob, then to R2 |
 | `chitthi-restore-drill.timer` → `backup.sh drill` | the 1st of each month, 23:00 UTC | Restores the newest backup into a scratch database and verifies it |
 | `backup.sh selftest` | once at setup: `run-on-vm.sh deploy/host/backup.sh selftest` | Proves the VM's real credentials can create but not overwrite or delete |
+| `backup.sh restore confirm=chitthi.dhruvgoyal.tech [manifest=…] [from=azure\|r2]` | in an incident ("Incidents") | Replaces the live database with a backup's, and brings back any media the disk lacks. Details below. |
 
 Both timer services are capped at 256 MB and run at idle CPU and I/O priority.
 
@@ -382,9 +423,20 @@ Both timer services are capped at 256 MB and run at idle CPU and I/O priority.
 
 It then drops the scratch database.
 
+**What a restore does** (`backup.sh restore`):
+1. **Refuses without `confirm=chitthi.dhruvgoyal.tech`.**
+2. **Fetches and checks everything before touching anything:** the manifest (the newest, or `manifest=manifests/<UTC>.json`), the dump against both of its sha256 records, and a trial decryption. It reads from Azure by default, or with `from=r2`.
+3. **Keeps a copy of the current database:** stops the API, then dumps the live database to `/data/chitthi/pre-deploy/chitthi-pre-restore-<UTC>.dump`, in case the restore was the mistake.
+4. **Replaces the database:** drops `chitthi`, recreates it, `pg_restore`s the dump, then checks the schema version and the counts.
+5. **Brings back missing media:** every file the manifest lists that the disk lacks is decrypted next to its place, given to uid 10010 with mode 0600 (as the API writes them), and renamed into place.
+6. **Brings the release back:** runs the release's migrations (the backup may be older than the code) and starts the API.
+
+Then run `deploy.sh smoke`.
+
 **Alerts and freshness:**
 - healthchecks.io gets start, success and failure pings, with a one-line reason and never a
   secret. Its 26-hour freshness window catches a backup that silently didn't run.
+- **The disk alert rides on the nightly check.** If `/data` is 80 % full or more, a successful run still pings "fail", with the reason ("backup … succeeded, but /data is N% full"). Azure has no metric for a filesystem's free space. See "Disk growth".
 - Every deploy also fails if a timer isn't active or the last successful backup is more than 26
   hours old, once the first night is past.
 
@@ -393,7 +445,8 @@ It then drops the scratch database.
 | Secret | Used for |
 |---|---|
 | `chitthi-backup-age-recipient` | The public key backups are encrypted to |
-| `chitthi-backup-age-identity` | The private key, read by the drill only |
+| `chitthi-backup-age-identity` | The private key, read only by the drill and a restore |
+| `chitthi-backup-age-identity-previous` | After a key rotation only: the old private key, kept while anything encrypted to it remains ("Secret rotation") |
 | `chitthi-r2-endpoint`, `chitthi-r2-access-key-id`, `chitthi-r2-secret-access-key` | The R2 copy |
 | `chitthi-hc-backup-url`, `chitthi-hc-drill-url` | healthchecks.io ping URLs |
 
@@ -426,12 +479,155 @@ days of soft delete. The app says so in Settings and on the account-deletion scr
 **Tested in CI on every push** (`deploy/host/test-deploy.sh`), with folders standing in for the
 two buckets. It runs:
 - two nightly runs: two dumps and manifests, media uploaded once, R2 in step, dumps unreadable
-  without the key;
+  without the key, and the disk warning at its threshold;
 - a drill that passes;
+- a key rotation, after which the drill reads the new key's dump and the old key's media;
+- a restore:
+  - refused without `confirm=`;
+  - with a media file deleted and a table added since the backup: the table is gone, the file is back intact with uid 10010 and mode 0600, the replaced database is kept, and the smoke test passes;
+  - then again from R2;
 - a tampered dump the drill catches;
 - a deploy that confirms the timers and the fresh backup.
 
 The Azure REST calls and R2 permissions themselves are proven on the VM by `backup.sh selftest`.
+
+## Alerts
+
+Everything below emails you. Each row says what it means and where to start; "Incidents" has the steps.
+
+| Alert | From | Means | First move |
+|---|---|---|---|
+| `vm-unavailable` (severity 1) | Azure metric | The VM is down or unreachable to Azure for 5 minutes | "The VM is down" |
+| `vm-resource-health` | Azure activity log | Azure itself reports the VM degraded (host failure, maintenance) | Read the event, then "The VM is down" |
+| `vm-low-memory` | Azure metric | Under 100 MiB available for 15 minutes | `status.sh`: which container grew? See "Memory budget" |
+| `vm-cpu-credits-low` | Azure metric | The burstable VM is about to be held to its baseline CPU | `status.sh`. A sustained load means the VM size no longer fits |
+| `role-assignment-changed` | Azure activity log | Someone granted a role in the subscription | Expected only when you run `setup.sh`. Otherwise treat it as a compromise ("A credential is exposed") |
+| Budget 50 / 80 / 100 % and 100 % forecast | Azure Cost Management | Spending this month | Cost Management → Cost analysis, grouped by resource |
+| `chitthi-backup` down | healthchecks.io | Last night's backup failed (the reason is in the ping), didn't run, or `/data` is 80 % full | "A backup alert" |
+| `chitthi-drill` down | healthchecks.io | The monthly restore drill failed or didn't run | "A backup alert" |
+| Deploy workflow failed | GitHub (email on failed runs) | A deploy failed and rolled back, or the outside check failed | "A deploy failed" |
+
+**A known gap: no outside uptime check between deploys.** If the API or Caddy dies while the VM is fine, no alert fires until someone notices or the next deploy's outside check runs. Certificate renewal is the same: Caddy renews 30 days ahead, and only a deploy's check, which wants 14+ days left, would notice a failure.
+
+The fix, before go-live: a free external monitor on `https://chitthi.dhruvgoyal.tech/api/health` that expects `{"status":"ok","db":"ok"}` and watches the certificate's expiry. UptimeRobot's free plan, for example. It only reads the health endpoint and never carries chat traffic.
+
+## Secret rotation
+
+`bash deploy/azure/setup.sh rotate name=<secret>` stores a new value: generated for passwords and the backup key, asked for (hidden, format-checked) for the rest. Then:
+
+| Secret | Then | Takes effect |
+|---|---|---|
+| `chitthi-postgres-password` | Deploy (Actions → Deploy → Run workflow) | The deploy sets it in Postgres, through the local socket, before migrating |
+| `chitthi-api-db-password` | Deploy | The migrate job sets it on the `chitthi_api` role, and the API's env file gets it |
+| `chitthi-google-client-secret`, `chitthi-github-client-secret` (and the IDs) | Create the new secret at Google or GitHub first, then rotate, deploy, and delete the old secret there | The deploy writes `api.env` |
+| `chitthi-r2-access-key-id`, `chitthi-r2-secret-access-key` | Create a new R2 token (Object Read & Write, this bucket only), rotate both, then revoke the old token | The next backup run: secrets are read on every run |
+| `chitthi-hc-backup-url`, `chitthi-hc-drill-url` | Nothing more | The next run |
+| `chitthi-backup-age-identity` (the backup key pair) | Rotate. The old private key moves to `chitthi-backup-age-identity-previous`, and a new pair takes over | Tonight's backup uses the new key. The drill and restore read both keys |
+
+**About the backup key.** Rotate it only if it may be exposed: old media stays encrypted to the old key, since it is never re-uploaded. Update your offline copy of the private key.
+- Delete `-previous` only once nothing encrypted to it remains. That is 12 weeks: dumps expire after 35 + 14 days, and media after compaction plus 14 days.
+- Until then, `rotate` refuses to rotate again.
+
+**Not secrets, nothing to rotate:**
+- the deploy's GitHub token (a new one per job, revoked when the job ends);
+- Azure access (OIDC and managed identities, no stored keys);
+- the TLS certificate (Caddy renews it).
+
+**Every value is checked in CI:** `deploy.sh` writes database passwords only if they're 24+ characters of `[A-Za-z0-9_-]`, and the deploy test rotates both database passwords on every push.
+
+## Updates
+
+| What | How it's updated | Who |
+|---|---|---|
+| Ubuntu packages, including Docker | unattended-upgrades, security updates daily. A reboot, when needed, at 21:30 UTC (03:00 IST); containers come back by themselves (`restart: unless-stopped`) | Automatic |
+| Node dependencies | `npm install --save-exact --before=<today − 14 days> <pkg>@<version>`, the full gate, push. High or critical advisories: "Pending dependency upgrades" | You |
+| Base images: `node`, `alpine`, `caddy`, `postgres` | Pick a version published at least 14 days ago and take its digest (`docker buildx imagetools inspect <image>:<tag>`). Replace it in `api/Dockerfile`, `web/Dockerfile`, `deploy/chitthi/compose.yaml` (Postgres) and `deploy/edge/compose.yaml` (the edge Caddy), and keep `.nvmrc` in step with Node. Push: CI builds, smoke-tests and measures. The deploy ships the app. For the edge, also run `run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=…` | You |
+| Postgres minor (18.x) | A new image digest in `deploy/chitthi/compose.yaml`; the deploy restarts the database on it | You |
+| Postgres major (18 → 19) | Not in place: the data directory format changes. Take a backup (`run-on-vm.sh deploy/host/backup.sh run`). Change the image. Then, in one script through Run Command: stop the stack and move `/data/chitthi/pg` aside. Deploy, which starts an empty cluster on the new version. Then `backup.sh restore confirm=chitthi.dhruvgoyal.tech`. Delete the old directory a week later | You, in a quiet hour |
+| Ubuntu's next LTS | Not in place. Build a new VM: delete the VM (the data disk stays, locked), run `setup.sh infra` with the newer image, then bootstrap, edge and deploy. The data disk keeps the data | You, every couple of years |
+
+## Disk growth
+
+`/data` holds the database, media, pre-deploy dumps and the backup stage. Two guards:
+- **The nightly backup check turns red** at 80 % used.
+- **The API refuses uploads** (507) when free space falls below 15 % or 2 GB, whichever is larger. Chat keeps working.
+
+**To grow it** (online; the app keeps running):
+1. Make the disk bigger, for example 64 → 128 GiB (P6 → P10, which is no longer in the free allowance): `az disk update -g apps-host -n apps-vm-data --size-gb 128`. If Azure refuses while the disk is attached, `az vm deallocate -g apps-host -n apps-vm`, update, then `az vm start`. That means downtime.
+2. Grow the filesystem: `bash deploy/azure/run-on-vm.sh deploy/host/grow-data-disk.sh`. It rescans the disk and runs `resize2fs` on the mounted ext4. CI does the same to a loop device on every push, with the stack running.
+3. `status.sh` shows the new size.
+
+Disks only grow. Shrinking means a new disk and a restore.
+
+## Adding the second app (Hisaab)
+
+The host was built for two apps. Hisaab gets its own of everything, and shares only the VM and the edge:
+
+| Piece | Chitthi | Hisaab |
+|---|---|---|
+| Container uids | 10010 (app), 10011 (db) | 10020, 10021 |
+| On the host | `/srv/chitthi`, `/data/chitthi/*` | `/srv/hisaab`, `/data/hisaab/*`. Add both, owned by its uids, to `bootstrap.sh`, and re-run it |
+| Loopback ports | API 8082, web 5175 | API 8081, web 5174 (its dev ports) |
+| Edge | `sites/chitthi.caddy`, written only by Chitthi's deploy | `sites/hisaab.caddy`, written only by Hisaab's deploy, validated the same way |
+| Postgres | its own container, `mem_limit` 160m | its own |
+| Azure | Key Vault, backup storage and deploy identity in resource group `chitthi` | the same set in its own resource group, from its own copy of `setup.sh`'s app half |
+| GitHub | `DhruvGoyal404/chitthi` → `chitthi-deploy` | its repo → its own deploy identity, also limited to managed Run Command on `apps-vm` |
+| Locks on the host | `/run/chitthi-deploy.lock` | `/run/hisaab-deploy.lock`. Both take `/run/edge-deploy.lock` around the edge reload |
+
+**Before it goes live:**
+- Measure it the way "Memory budget" measures Chitthi, and replace the stand-in rows with real numbers. If the busy total no longer fits the VM's ~900 MiB, the cheapest fix is one shared Postgres with a database and role per app (saves ~25 MiB idle). A bigger VM is next.
+- The metadata guard and the firewall need no change: containers can't reach the metadata service whatever their app.
+
+## Incidents
+
+Start with `bash deploy/azure/run-on-vm.sh deploy/host/status.sh`. It shows memory, disk, recent API errors, backups, the last deploys, the certificate, containers and health. Also run `bash deploy/azure/public-check.sh` for what the world sees.
+
+**The site is down, the VM is up.**
+1. `status.sh`: is a container restarting? Are there errors in the API log?
+2. If it broke at a deploy, roll back: Actions → Deploy → `rollback`, or `run-on-vm.sh deploy/host/deploy.sh rollback`.
+3. Otherwise, redeploy the current commit (Actions → Deploy → `deploy`). That rewrites config and env files, and restarts everything that's down.
+
+**A deploy failed.** The workflow log shows which step failed. After the switch, a failure rolls back by itself, and the outside check then shows what's being served. Fix forward with a new commit.
+
+Migrations never roll back. A migration that broke the previous release breaks the expand-then-contract rule ("Deploy and rollback"). Repair the schema with a new migration, or as a last resort restore the pre-deploy dump (`/data/chitthi/pre-deploy/`) with `pg_restore` through a script.
+
+**The VM is down** (`vm-unavailable`, Resource Health):
+1. Azure's own events (Resource Health) tell you whether it's a platform issue; if so, wait.
+2. `az vm restart -g apps-host -n apps-vm`. If it doesn't come up, use the Serial Console ("Inventory and access").
+3. **If the OS is beyond repair,** replace the VM. The data disk survives, with its delete lock and detach-on-delete:
+   - `az vm delete -g apps-host -n apps-vm --yes`;
+   - `setup.sh infra` (a new VM, with the existing data disk attached at LUN 0);
+   - `run-on-vm.sh deploy/host/bootstrap.sh`, which finds ext4 and mounts it without formatting;
+   - the edge, then a deploy.
+
+   Nothing is restored, and nothing is lost. The public IP stays too, so DNS needs no change.
+
+**The data disk is lost or corrupt:**
+1. If it might still hold anything, snapshot it first: `az snapshot create -g apps-host -n apps-vm-data-old --source apps-vm-data`.
+2. Remove its lock (`az lock delete -g apps-host -n do-not-delete --resource apps-vm-data --resource-type Microsoft.Compute/disks`). Then detach it (`az vm disk detach -g apps-host --vm-name apps-vm -n apps-vm-data`) and delete it (`az disk delete -g apps-host -n apps-vm-data`). Azure disks can't be renamed, and `setup.sh infra` recreates the name: a new, empty disk at LUN 0, with the lock back on.
+3. `bootstrap.sh` formats the new disk, which has no signature. Then edge and deploy (an empty database).
+4. `run-on-vm.sh deploy/host/backup.sh restore confirm=chitthi.dhruvgoyal.tech` (add `from=r2` if Azure's copy is unavailable).
+
+At worst you lose everything since last night's backup (02:00 IST).
+
+**A backup alert.** The ping carries the reason; healthchecks.io shows it.
+- "/data is N% full": "Disk growth".
+- Anything else: re-run it by hand with `run-on-vm.sh deploy/host/backup.sh run` and read the output.
+- A failed drill means a backup that might not restore. Treat it as urgent until a drill passes again: `run-on-vm.sh deploy/host/backup.sh drill`.
+
+**A credential is exposed:**
+- **A Key Vault secret:** rotate it ("Secret rotation").
+- **The VM may be compromised:**
+  1. Take it off the network: `az network nsg rule delete -g apps-host --nsg-name apps-vm-nsg -n allow-https`, and the same for `allow-http`.
+  2. Then replace the VM as above. Don't reuse its OS disk.
+  3. Rotate every secret.
+  4. The backups can't have been altered from the VM: Azure's copy is create-only, and R2 is locked for 30 days.
+- **An unexpected role assignment:** remove it (`az role assignment delete`), then run `setup.sh check`, which fails while any identity holds more than its roles.
+- **Your GitHub account:** revoke your sessions. Then check the federated credential (`setup.sh check`) and the repository variables.
+
+**Over budget or out of Actions minutes:**
+- **Azure:** Cost Management shows which resource. `az vm deallocate -g apps-host -n apps-vm` stops the VM's compute charges, and the site goes down.
+- **GitHub Actions minutes:** with none left, CI and deploys stop until the month resets ("GitHub plan limits"). The site keeps running, and Cloud Shell can still roll back.
 
 ## Pending dependency upgrades
 

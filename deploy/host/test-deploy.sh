@@ -10,9 +10,10 @@
 #   3. a release whose API exits at once: must fail, roll itself back, previous release serving
 #   4. a release whose site file is broken: must fail before changing anything
 #   5. an explicit rollback after a good second release
-#   6. backups: two nightly runs (append-only, media uploaded once), a restore drill that passes,
-#      a tampered dump that the drill catches, and a re-deploy that finds the timers and a fresh
-#      backup
+#   6. backups: two nightly runs (append-only, media uploaded once; the disk warning), a restore
+#      drill that passes, a backup key rotation (drill and restore read both keys), a real restore
+#      (from Azure, then from R2), a tampered dump that the drill catches, and a re-deploy that
+#      finds the timers and a fresh backup
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -61,9 +62,14 @@ if [[ ${#token[@]} -gt 0 ]]; then
 else
   echo "ok   1. first deploy (no token: local files)"
 fi
+# Both database passwords rotated in "Key Vault" first: the migrations log in over TCP as the owner
+# and the API's health includes its database, so success means both new passwords took effect.
+openssl rand -hex 24 > "$secrets/chitthi-postgres-password"
+openssl rand -hex 24 > "$secrets/chitthi-api-db-password"
 release ci
 [[ $(current_api) == chitthi-api:ci ]] || fail "re-deploy changed the release"
-echo "ok   2. re-deploy of the same release"
+sudo grep -qF "$(cat "$secrets/chitthi-postgres-password")" /srv/chitthi/migrate.env || fail "the rotated owner password was not written"
+echo "ok   2. re-deploy of the same release, with both database passwords rotated"
 
 docker build -q -t chitthi-api:broken - >/dev/null <<'EOF'
 FROM chitthi-api:ci
@@ -115,7 +121,9 @@ SQL
 
 backup run
 sleep 1
-backup run
+out=$(sudo env CHITTHI_BACKUP_TEST_DIR="$bt" CHITTHI_BACKUP_DISK_WARN_PCT=0 /srv/chitthi/bin/backup.sh run)
+echo "$out"
+grep -q 'WARNING: /data is [0-9]*% full' <<<"$out" || fail "the nightly run did not warn about the disk at its threshold"
 dumps=$(sudo find "$bt/azure/db" -name '*.dump.age' | wc -l)
 [[ $dumps -eq 2 ]] || fail "two backups should leave two dumps, found $dumps"
 [[ $(sudo find "$bt/azure/manifests" -name '*.json' | wc -l) -eq 2 ]] || fail "two backups should leave two manifests"
@@ -128,14 +136,42 @@ echo "ok   6a. two nightly backups: two dumps and manifests, media uploaded once
 backup drill
 echo "ok   6b. restore drill: checksums, decryption, restore, counts, schema version, media sha256, R2 copy"
 
+# Key rotation: the old private key becomes -previous, a new pair takes over. The media file stays
+# encrypted to the old key (it's never re-uploaded); the next dump uses the new one.
+sudo mv "$bt/secrets/chitthi-backup-age-identity" "$bt/secrets/chitthi-backup-age-identity-previous"
+age-keygen -o "$bt/secrets/chitthi-backup-age-identity" 2>/dev/null
+age-keygen -y "$bt/secrets/chitthi-backup-age-identity" > "$bt/secrets/chitthi-backup-age-recipient"
+sleep 1
+backup run >/dev/null
+backup drill
+echo "ok   6c. after a key rotation, the drill reads the new dump and the old-key media"
+
+# A real restore: the media file is lost, and a table appears that the backup never had.
+media_file=/data/chitthi/media/${key:0:2}/${key:2:2}/$key
+sudo rm -f "$media_file"
+db <<<'CREATE TABLE written_after_the_backup (x int)'
+if backup restore 2>/dev/null; then fail "a restore ran without confirm="; fi
+backup restore confirm=chitthi.dhruvgoyal.tech
+[[ $(db <<<"SELECT count(*) FROM pg_tables WHERE tablename = 'written_after_the_backup'") == 0 ]] || fail "the restore did not replace the database"
+[[ $(db <<<"SELECT count(*) FROM attachments WHERE storage_key = '$key'") == 1 ]] || fail "the restored database lacks the attachment"
+[[ $(sudo sha256sum "$media_file" | cut -d' ' -f1) == "$file_sha" ]] || fail "the media file did not come back intact"
+[[ $(sudo stat -c '%u %a' "$media_file") == '10010 600' ]] || fail "the restored media file is not owned by the API, mode 0600"
+sudo find /data/chitthi/pre-deploy -name 'chitthi-pre-restore-*.dump' | grep -q . || fail "the restore kept no copy of the database it replaced"
+run smoke >/dev/null || fail "the site does not pass the smoke test after the restore"
+sudo rm -f "$media_file"
+backup restore confirm=chitthi.dhruvgoyal.tech from=r2 >/dev/null
+[[ $(sudo sha256sum "$media_file" | cut -d' ' -f1) == "$file_sha" ]] || fail "the restore from R2 did not bring the media file back"
+run smoke >/dev/null || fail "the site does not pass the smoke test after the restore from R2"
+echo "ok   6d. restore: refused without confirm=; database replaced (old one kept), media back with its owner and mode, site healthy; again from R2"
+
 newest=$(sudo find "$bt/azure/db" -name '*.dump.age' | sort | tail -n 1)
 echo tampered | sudo tee -a "$newest" >/dev/null
 if backup drill 2>/dev/null; then fail "the drill passed on a tampered dump"; fi
-echo "ok   6c. the drill catches a tampered dump"
+echo "ok   6e. the drill catches a tampered dump"
 
 release ci | tee "$bt/deploy.log"
 grep -q 'backups: timers active, last backup 0 h ago' "$bt/deploy.log" || fail "the deploy did not confirm the timers and a fresh backup"
-echo "ok   6d. a deploy asserts both timers and the fresh backup"
+echo "ok   6f. a deploy asserts both timers and the fresh backup"
 
 [[ $(edge_files) == "$before" ]] || { diff <(echo "$before") <(edge_files) >&2; fail "Chitthi's deploys changed a file that isn't theirs"; }
 [[ $(other_site) == 'the other app' ]] || fail "the second app's site stopped being served"

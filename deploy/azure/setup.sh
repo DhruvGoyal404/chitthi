@@ -5,6 +5,7 @@
 #   git clone https://github.com/DhruvGoyal404/chitthi && cd chitthi
 #   bash deploy/azure/setup.sh infra alert_email=<address> [budget=<amount>] [subscription=<id>]
 #   bash deploy/azure/setup.sh secrets      # generates or asks for each missing Key Vault secret
+#   bash deploy/azure/setup.sh rotate name=<secret>   # a new value for one (docs/MAINTENANCE.md)
 #   bash deploy/azure/setup.sh check        # read-only: verifies everything below
 #
 # Re-runnable. Each step creates what's missing and brings settings back to what's written here.
@@ -321,8 +322,21 @@ set_budget() { # <email> [amount]
 }
 
 # ==================================================================================================
-secrets() {
-  local have tmp i
+# --- Secrets: values go from 0600 files on /dev/shm to Key Vault, never on a command line.
+# Asked-for secrets: name|prompt|shape.
+ASKED=(
+  'chitthi-google-client-id|Google OAuth client ID|^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$'
+  'chitthi-google-client-secret|Google OAuth client secret|^[A-Za-z0-9_-]{20,}$'
+  'chitthi-github-client-id|GitHub OAuth app client ID|^[A-Za-z0-9.]{16,}$'
+  'chitthi-github-client-secret|GitHub OAuth app client secret|^[0-9a-f]{40}$'
+  'chitthi-r2-endpoint|R2 S3 endpoint (https://<account id>.r2.cloudflarestorage.com)|^https://[0-9a-f]{32}(\.(eu|fedramp))?\.r2\.cloudflarestorage\.com$'
+  'chitthi-r2-access-key-id|R2 access key ID|^[0-9a-f]{32}$'
+  'chitthi-r2-secret-access-key|R2 secret access key|^[0-9a-f]{64}$'
+  'chitthi-hc-backup-url|healthchecks.io ping URL for the nightly backup|^https://hc-ping\.com/[A-Za-z0-9/_-]+$'
+  'chitthi-hc-drill-url|healthchecks.io ping URL for the monthly restore drill|^https://hc-ping\.com/[A-Za-z0-9/_-]+$'
+)
+open_vault() { # waits for access; sets $have (stored names) and $tmp
+  local i
   exists keyvault show -g "$APP_RG" -n "$KV" || die "Key Vault $KV doesn't exist yet: run setup.sh infra first"
   log "Key Vault $KV: waiting until you can manage secrets (a new role assignment takes a few minutes)"
   for i in $(seq 1 40); do
@@ -331,58 +345,91 @@ secrets() {
     sleep 15
   done
   tmp=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)
-  trap 'rm -rf -- "$tmp"' EXIT
-  has() { grep -qx "$1" <<<"$have"; }
-  store() { # <name> <file>: the value goes from a file, never a command line
-    q keyvault secret set --vault-name "$KV" --name "$1" --file "$2" --encoding utf-8
-    rm -f "$2"
-    log "stored $1"
-  }
+  # Expanded now: $tmp is the caller's local, gone by the time the trap runs.
+  # shellcheck disable=SC2064
+  trap "rm -rf -- '$tmp'" EXIT
+}
+has() { grep -qx "$1" <<<"$have"; }
+store() { # <name> <file>: a new value (a new version, if the name exists)
+  q keyvault secret set --vault-name "$KV" --name "$1" --file "$2" --encoding utf-8
+  rm -f "$2"
+  log "stored $1"
+}
+new_password() { # <name>: 32 characters of [A-Za-z0-9_-] (what deploy.sh requires)
+  openssl rand -base64 24 | tr '+/' '-_' | tr -d '\n' > "$tmp/value"
+  store "$1" "$tmp/value"
+}
+new_keypair() {
+  rm -rf "$tmp/age" && mkdir "$tmp/age"
+  python3 "$here/age_keypair.py" "$tmp/age"
+  store chitthi-backup-age-identity "$tmp/age/identity"
+  store chitthi-backup-age-recipient "$tmp/age/recipient"
+  log "new backup keypair. Keep a copy of the private key outside Azure (a password manager): without it no backup can be read."
+  log "  show it once with: az keyvault secret show --vault-name $KV -n chitthi-backup-age-identity --query value -o tsv"
+}
+ask() { # <name>: asks for the value (hidden), checks its shape, stores it
+  local entry prompt shape value
+  for entry in "${ASKED[@]}"; do
+    [[ ${entry%%|*} == "$1" ]] || continue
+    prompt=${entry#*|}; shape=${prompt#*|}; prompt=${prompt%%|*}
+    while :; do
+      read -rsp "  $prompt: " value
+      echo
+      [[ $value =~ $shape ]] && break
+      echo "  that doesn't look like one; try again (Ctrl-C to stop; what's stored so far stays)"
+    done
+    printf '%s' "$value" > "$tmp/value"
+    unset value
+    store "$1" "$tmp/value"
+    return 0
+  done
+  die "no such secret: $1"
+}
 
-  # Generated. Database passwords: 32 characters of [A-Za-z0-9_-] (what deploy.sh requires).
-  local name
+secrets() { # every missing secret: generated or asked for; never replaces one
+  local have tmp name entry
+  open_vault
   for name in chitthi-postgres-password chitthi-api-db-password; do
-    has "$name" && continue
-    openssl rand -base64 24 | tr '+/' '-_' | tr -d '\n' > "$tmp/value"
-    store "$name" "$tmp/value"
+    has "$name" || new_password "$name"
   done
   if has chitthi-backup-age-identity && has chitthi-backup-age-recipient; then
     :
   elif has chitthi-backup-age-identity || has chitthi-backup-age-recipient; then
     die "only one half of the backup keypair is in Key Vault; restore the other half (or, if no backup was ever made, delete both and re-run)"
   else
-    mkdir "$tmp/age"
-    python3 "$here/age_keypair.py" "$tmp/age"
-    store chitthi-backup-age-identity "$tmp/age/identity"
-    store chitthi-backup-age-recipient "$tmp/age/recipient"
-    log "new backup keypair. Keep a copy of the private key outside Azure (a password manager): without it no backup can be read."
-    log "  show it once with: az keyvault secret show --vault-name $KV -n chitthi-backup-age-identity --query value -o tsv"
+    new_keypair
   fi
-
-  # Asked for. Input is hidden; each value is checked for the right shape before it's stored.
-  ask() { # <name> <prompt> <regex>
-    has "$1" && return 0
-    local value
-    while :; do
-      read -rsp "  $2: " value
-      echo
-      [[ $value =~ $3 ]] && break
-      echo "  that doesn't look like one; try again (Ctrl-C to stop; what's stored so far stays)"
-    done
-    printf '%s' "$value" > "$tmp/value"
-    unset value
-    store "$1" "$tmp/value"
-  }
-  ask chitthi-google-client-id "Google OAuth client ID" '^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$'
-  ask chitthi-google-client-secret "Google OAuth client secret" '^[A-Za-z0-9_-]{20,}$'
-  ask chitthi-github-client-id "GitHub OAuth app client ID" '^[A-Za-z0-9.]{16,}$'
-  ask chitthi-github-client-secret "GitHub OAuth app client secret" '^[0-9a-f]{40}$'
-  ask chitthi-r2-endpoint "R2 S3 endpoint (https://<account id>.r2.cloudflarestorage.com)" '^https://[0-9a-f]{32}(\.(eu|fedramp))?\.r2\.cloudflarestorage\.com$'
-  ask chitthi-r2-access-key-id "R2 access key ID" '^[0-9a-f]{32}$'
-  ask chitthi-r2-secret-access-key "R2 secret access key" '^[0-9a-f]{64}$'
-  ask chitthi-hc-backup-url "healthchecks.io ping URL for the nightly backup" '^https://hc-ping\.com/[A-Za-z0-9/_-]+$'
-  ask chitthi-hc-drill-url "healthchecks.io ping URL for the monthly restore drill" '^https://hc-ping\.com/[A-Za-z0-9/_-]+$'
+  for entry in "${ASKED[@]}"; do
+    has "${entry%%|*}" || ask "${entry%%|*}"
+  done
   log "all secrets are in $KV"
+}
+
+rotate() { # <name>: a new value for one secret (docs/MAINTENANCE.md, "Secret rotation")
+  local have tmp name=${arg[name]:-}
+  [[ -n $name ]] || die "usage: setup.sh rotate name=<secret>"
+  open_vault
+  has "$name" || die "$name isn't stored yet: use setup.sh secrets"
+  case $name in
+    chitthi-postgres-password | chitthi-api-db-password)
+      new_password "$name"
+      log "next: deploy (Actions > Deploy > Run workflow). The deploy sets the new password in Postgres." ;;
+    chitthi-backup-age-identity | chitthi-backup-age-recipient)
+      # Old media stays encrypted to the old key until compaction removes it, and old dumps until
+      # they expire: the old private key is kept as -previous, which the drill and restore also use.
+      if has chitthi-backup-age-identity-previous; then
+        die "chitthi-backup-age-identity-previous still exists. Delete it only once nothing encrypted to it remains (12 weeks after the last rotation, docs/MAINTENANCE.md), then rotate again"
+      fi
+      az keyvault secret show --vault-name "$KV" --name chitthi-backup-age-identity --query value --output tsv --only-show-errors \
+        | tr -d '\n' > "$tmp/previous"
+      [[ -s $tmp/previous ]] || die "could not read the current private key"
+      store chitthi-backup-age-identity-previous "$tmp/previous"
+      new_keypair
+      log "next: tonight's backup uses the new key; keep the old private key (now -previous) until $(date -u -d '+12 weeks' +%F)." ;;
+    *)
+      ask "$name"
+      log "next: deploy for OAuth secrets; the backup secrets are read at every run. Then revoke the old value at its provider." ;;
+  esac
 }
 
 # ==================================================================================================
@@ -499,6 +546,7 @@ EOF
 case $cmd in
   infra) infra ;;
   secrets) secrets ;;
+  rotate) rotate ;;
   check) check ;;
-  *) die "usage: setup.sh infra alert_email=<address> [budget=<amount>] [subscription=<id>] | secrets | check" ;;
+  *) die "usage: setup.sh infra alert_email=<address> [budget=<amount>] [subscription=<id>] | secrets | rotate name=<secret> | check" ;;
 esac
