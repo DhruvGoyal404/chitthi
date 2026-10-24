@@ -1,21 +1,26 @@
 name: Deploy
 
 # Production deploys (docs/MAINTENANCE.md, "Deploy and rollback").
-# - After CI passes on a push to main: build the three images at exactly that commit, check them,
-#   push them to GHCR and deploy them by digest.
+# - After CI passes on a push to main whose images job ran (docs-only pushes skip it, and so this):
+#   build the three images at exactly that commit, check them, push them to GHCR and deploy them
+#   by digest.
 # - By hand (Actions → Deploy → Run workflow, from main): deploy that commit again, roll back to
-#   the previous release, or smoke-test what's running.
-# Two jobs, so the token that can write packages never leaves GitHub's runner:
+#   the previous release, smoke-test what's running, or rehearse a broken deploy (rehearse-rollback:
+#   a release whose API can't start must fail and roll itself back, leaving the site healthy).
+# Jobs, so the token that can write packages never leaves GitHub's runner:
+# - gate: actions:read. Asks CI whether its images job passed for this commit.
 # - build: contents:read + packages:write. Pushes the images; its token goes nowhere.
 # - deploy: contents:read + packages:read (+ id-token:write, which only lets the job ask GitHub
 #   for an OIDC token for Azure and adds no scope to GITHUB_TOKEN). This job's GITHUB_TOKEN is the
 #   one handed to the VM, as a managed Run Command protected parameter (deploy/azure/run-on-vm.sh),
-#   to fetch this commit's config and pull the private images; GitHub revokes it when the job ends.
-#   deploy/azure/test_azure_tools.py asserts both permission blocks.
-# Azure sign-in is OIDC as chitthi-deploy, which trusts only this repo's main branch and may only
-# use managed Run Command on the VM: no stored credential.
+#   to fetch this commit's config and pull the images; GitHub revokes it when the job ends.
+#   deploy/azure/test_azure_tools.py asserts every permission block.
+# The deploy job runs in the "production" environment: you approve each run (required reviewer),
+# from main only. Azure trusts only that environment's OIDC tokens, and chitthi-deploy may only
+# use managed Run Command on the VM: no stored credential. Account identifiers are environment
+# secrets, not variables, so the public logs show them masked.
 # Nothing runs until the repository variable DEPLOY_ENABLED is "true" (docs/MAINTENANCE.md, "Going
-# live"). No GitHub environment: private repos only get them on paid plans.
+# live").
 
 on:
   workflow_run:
@@ -27,7 +32,7 @@ on:
       action:
         description: What to do
         type: choice
-        options: [deploy, rollback, smoke]
+        options: [deploy, rollback, smoke, rehearse-rollback]
         default: deploy
 
 permissions: {}
@@ -44,15 +49,42 @@ defaults:
 env:
   SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
   REGISTRY: ghcr.io/dhruvgoyal404
+  ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.action || 'deploy' }}
 
 jobs:
-  build:
+  gate:
     if: >-
       vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' && (
-        (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy') ||
+        (github.event_name == 'workflow_dispatch' && (inputs.action == 'deploy' || inputs.action == 'rehearse-rollback')) ||
         (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
          github.event.workflow_run.event == 'push')
       )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      go: ${{ steps.ci.outputs.go }}
+    steps:
+      - name: Did CI's images job pass for this commit?
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -o pipefail
+          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          images=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.name == "images") | .conclusion')
+          if [[ $images == success ]]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "CI's images job: ${images:-absent} (a docs-only change): nothing to deploy"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -62,6 +94,7 @@ jobs:
       api: ${{ steps.push.outputs.api }}
       migrate: ${{ steps.push.outputs.migrate }}
       web: ${{ steps.push.outputs.web }}
+      api_broken: ${{ steps.push.outputs.api_broken }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,6 +108,11 @@ jobs:
           docker build -q -f web/Dockerfile "${label[@]}" -t "$REGISTRY/chitthi-web:$SHA" . >/dev/null
       - name: Check the images
         run: scripts/check-images.sh "$REGISTRY/chitthi-api:$SHA" "$REGISTRY/chitthi-migrate:$SHA" "$REGISTRY/chitthi-web:$SHA"
+      - name: Build the deliberately broken API (rehearsal only)
+        if: env.ACTION == 'rehearse-rollback'
+        run: |
+          printf 'FROM %s\nCMD ["node", "-e", "console.error(\\"rehearsal: deliberately broken\\"); process.exit(1)"]\n' \
+            "$REGISTRY/chitthi-api:$SHA" | docker build -q -t "$REGISTRY/chitthi-api:$SHA-broken" - >/dev/null
       - name: Push, and record the digests
         id: push
         env:
@@ -82,31 +120,35 @@ jobs:
         run: |
           set -o pipefail
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
-          for t in api migrate web; do
-            docker push -q "$REGISTRY/chitthi-$t:$SHA" >/dev/null
-            ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$REGISTRY/chitthi-$t:$SHA")
-            [[ $ref =~ ^ghcr\.io/dhruvgoyal404/chitthi-$t@sha256:[0-9a-f]{64}$ ]] || { echo "unexpected digest reference: $ref"; exit 1; }
-            echo "$t=$ref" >> "$GITHUB_OUTPUT"
-            echo "$ref"
+          tags=(api:"$SHA" migrate:"$SHA" web:"$SHA")
+          [[ $ACTION == rehearse-rollback ]] && tags+=(api:"$SHA-broken")
+          for t in "${tags[@]}"; do
+            name=${t%%:*} out=$name
+            [[ $t == *-broken ]] && out=api_broken
+            docker push -q "$REGISTRY/chitthi-$t" >/dev/null
+            ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$REGISTRY/chitthi-$t")
+            [[ $ref =~ ^ghcr\.io/dhruvgoyal404/chitthi-$name@sha256:[0-9a-f]{64}$ ]] || { echo "unexpected digest reference: $ref"; exit 1; }
+            echo "$out=$ref" >> "$GITHUB_OUTPUT"
+            echo "$out: $ref"
           done
           docker logout ghcr.io >/dev/null
 
   deploy:
-    needs: build
-    # A dispatched rollback or smoke test skips the build.
+    needs: [gate, build]
+    # A dispatched rollback or smoke test skips the gate and the build.
     if: >-
       !cancelled() && vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' && (
         needs.build.result == 'success' ||
-        (github.event_name == 'workflow_dispatch' && inputs.action != 'deploy')
+        (github.event_name == 'workflow_dispatch' && (inputs.action == 'rollback' || inputs.action == 'smoke'))
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    environment: production
     permissions:
       contents: read # the VM fetches this commit's config with the job's token
-      packages: read # and pulls the private images with it
+      packages: read # and pulls the images with it
       id-token: write # OIDC sign-in to Azure
     env:
-      ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.action || 'deploy' }}
       VM_RG: ${{ vars.VM_RG }}
       VM_NAME: ${{ vars.VM_NAME }}
     steps:
@@ -116,9 +158,9 @@ jobs:
           persist-credentials: false
       - name: Sign in to Azure (OIDC, no stored secret)
         env:
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           set -o pipefail
           token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
@@ -127,26 +169,37 @@ jobs:
           az login --service-principal --username "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID" \
             --federated-token "$token" --only-show-errors --output none
           az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+      - name: The site must be healthy before a rehearsal
+        if: env.ACTION == 'rehearse-rollback'
+        run: deploy/azure/public-check.sh
       - name: Edge (unchanged unless deploy/edge changed)
         if: env.ACTION == 'deploy'
         env:
           RUN_ON_VM_GITHUB_TOKEN: ${{ github.token }}
-          ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+          ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
         run: deploy/azure/run-on-vm.sh deploy/host/edge.sh "sha=$SHA" "acme_email=$ACME_EMAIL"
       - name: Deploy
-        if: env.ACTION == 'deploy'
+        if: env.ACTION == 'deploy' || env.ACTION == 'rehearse-rollback'
         env:
           RUN_ON_VM_GITHUB_TOKEN: ${{ github.token }}
-          API: ${{ needs.build.outputs.api }}
+          API: ${{ env.ACTION == 'rehearse-rollback' && needs.build.outputs.api_broken || needs.build.outputs.api }}
           MIGRATE: ${{ needs.build.outputs.migrate }}
           WEB: ${{ needs.build.outputs.web }}
-          KEY_VAULT: ${{ vars.KEY_VAULT }}
-          BACKUP_ACCOUNT: ${{ vars.BACKUP_ACCOUNT }}
+          KEY_VAULT: ${{ secrets.KEY_VAULT }}
+          BACKUP_ACCOUNT: ${{ secrets.BACKUP_ACCOUNT }}
           BACKUP_CONTAINER: ${{ vars.BACKUP_CONTAINER }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
+          set +e
           deploy/azure/run-on-vm.sh deploy/host/deploy.sh deploy "sha=$SHA" "api=$API" "migrate=$MIGRATE" "web=$WEB" \
             "vault=$KEY_VAULT" "storage=$BACKUP_ACCOUNT" "container=$BACKUP_CONTAINER" "r2_bucket=$R2_BUCKET"
+          rc=$?
+          if [[ $ACTION == rehearse-rollback ]]; then
+            [[ $rc -ne 0 ]] || { echo "::error::the deliberately broken release deployed successfully"; exit 1; }
+            echo "rehearsal: the broken release failed and rolled itself back, as it must (the next step checks the site)"
+            exit 0
+          fi
+          exit "$rc"
       - name: Roll back to the previous release
         if: env.ACTION == 'rollback'
         run: deploy/azure/run-on-vm.sh deploy/host/deploy.sh rollback

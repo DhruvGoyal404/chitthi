@@ -239,8 +239,12 @@ class DeployWorkflow(unittest.TestCase):
         with open(os.path.join(root, ".github", "workflows", "deploy.yml"), encoding="utf-8") as f:
             wf = yaml.safe_load(f)
         self.assertEqual(wf["permissions"], {})
-        build, deploy = wf["jobs"]["build"], wf["jobs"]["deploy"]
+        gate, build, deploy = wf["jobs"]["gate"], wf["jobs"]["build"], wf["jobs"]["deploy"]
+        self.assertEqual(gate["permissions"], {"actions": "read"})
         self.assertEqual(build["permissions"], {"contents": "read", "packages": "write"})
+        # Azure trusts only this environment's tokens (setup.sh's federated credential).
+        self.assertEqual(deploy["environment"], "production")
+        self.assertNotIn("environment", build)
         # id-token lets the job request an OIDC token for Azure; it adds no scope to GITHUB_TOKEN.
         self.assertEqual(deploy["permissions"], {"contents": "read", "packages": "read", "id-token": "write"})
         build_text = yaml.safe_dump(build)

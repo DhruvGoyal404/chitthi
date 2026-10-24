@@ -30,6 +30,7 @@ STATE=/data/chitthi/backup-state
 STAGE=/data/chitthi/backup-stage
 AZ_VERSION=2023-11-03
 DISK_WARN_PCT=${CHITTHI_BACKUP_DISK_WARN_PCT:-80} # the nightly run alerts at this much of /data used
+CERT_WARN_DAYS=14 # ... and when the certificate has fewer days left than this
 DUMPS=/data/chitthi/pre-deploy # where deploy.sh keeps its dumps; a restore keeps one there too
 HOST=chitthi.dhruvgoyal.tech
 # CI only, never on the VM: secrets from files, and local folders standing in for the buckets.
@@ -229,13 +230,24 @@ run_backup() {
 
   echo "$ts" > "$STATE/last-success"
   rm -rf "$STAGE"
-  # The disk alert rides on this check (Azure has no metric for a filesystem's free space): a full
-  # /data turns it red with the reason, though the backup itself succeeded.
-  local used
+  # Two host alerts ride on this check, turning it red with the reason though the backup itself
+  # succeeded: /data filling up (Azure has no metric for a filesystem's free space), and the TLS
+  # certificate close to expiry (Caddy renews 30 days ahead, so under 14 left means renewal has
+  # been failing for two weeks). The certificate is checked on the VM only: CI's is Caddy's
+  # internal one, which lives hours.
+  local used warnings=()
   used=$(df --output=pcent /data | tail -n 1 | tr -dc '0-9')
   if (( used >= DISK_WARN_PCT )); then
     log "WARNING: /data is ${used}% full (docs/MAINTENANCE.md, \"Disk growth\")"
-    hc fail "backup $ts succeeded, but /data is ${used}% full: grow the data disk (docs/MAINTENANCE.md, Disk growth)"
+    warnings+=("/data is ${used}% full: grow the data disk (docs/MAINTENANCE.md, Disk growth)")
+  fi
+  if [[ -z $TEST ]] && ! echo | openssl s_client -connect 127.0.0.1:443 -servername "$HOST" 2>/dev/null \
+      | openssl x509 -noout -checkend $((CERT_WARN_DAYS * 86400)) >/dev/null 2>&1; then
+    log "WARNING: the certificate for $HOST expires within $CERT_WARN_DAYS days, or isn't served"
+    warnings+=("the TLS certificate expires within $CERT_WARN_DAYS days: Caddy's renewal is failing (docs/MAINTENANCE.md, Incidents)")
+  fi
+  if [[ ${#warnings[@]} -gt 0 ]]; then
+    hc fail "backup $ts succeeded, but: $(IFS=';'; echo "${warnings[*]}")"
   else
     hc success "backup $ts: $name, $(grep -c . <<<"$keys" || true) media files, /data ${used}% full"
   fi

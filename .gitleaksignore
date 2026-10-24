@@ -1,0 +1,5 @@
+# gitleaks false positives (fingerprints: commit:file:rule:line). Each was checked by hand.
+# Made-up client secret strings in a test that the config treats client secrets as secrets for
+# log scrubbing (api/test/oauth.db.test.ts); no real credential was ever committed.
+be655e7a8d1deded2302e8ca6e720efa9bc2547c:api/test/oauth.db.test.ts:generic-api-key:40
+be655e7a8d1deded2302e8ca6e720efa9bc2547c:api/test/oauth.db.test.ts:generic-api-key:41

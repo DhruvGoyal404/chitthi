@@ -55,7 +55,8 @@ Every command here runs from Azure Cloud Shell, in a clone of this repo.
 | Secrets | Key Vault `chitthi-kv-<6 hex>` | `chitthi` |
 | Deploy identity | `chitthi-deploy` (OIDC from GitHub `main`) | `chitthi` |
 | Second backup copy | R2 bucket (`R2_BUCKET`), 30-day bucket lock | Cloudflare |
-| Backup monitoring | `chitthi-backup`, `chitthi-drill` | healthchecks.io |
+| Backup monitoring | `chitthi-backup` (also disk and certificate), `chitthi-drill` | healthchecks.io |
+| Uptime monitoring | keyword monitor on `/api/health`, every 5 minutes | UptimeRobot |
 | Code, CI, images | `DhruvGoyal404/chitthi` (private), `ghcr.io/dhruvgoyal404/chitthi-{api,migrate,web}` | GitHub |
 | On the VM | `/srv/edge` (shared Caddy), `/srv/chitthi` (compose, env files, `deploys.log`, `bin/backup.sh`), `/data/chitthi/{pg,media,pre-deploy,backup-state}` | `apps-vm` |
 
@@ -90,7 +91,7 @@ replaces a stored secret.
 | | Budget | `apps-host`, monthly, for the whole subscription. Default ₹700 (pass `budget=` if the billing currency isn't INR). Email at 50, 80 and 100 % actual, and at 100 % forecast. |
 | `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS. Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
 | | Key Vault `chitthi-kv-<6 hex>` | Standard, RBAC, purge protection, 90-day soft delete, delete lock. |
-| | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404/chitthi:ref:refs/heads/main`. |
+| | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404/chitthi:environment:production`. |
 
 The `<6 hex>` suffix comes from the subscription id, so every run finds the same names.
 
@@ -108,42 +109,84 @@ The `<6 hex>` suffix comes from the subscription id, so every run finds the same
 
 ### Going live, in order
 
-1. **Infrastructure:**
+Everything you do by hand, in order. Every command runs in Azure Cloud Shell (Bash), in a clone
+of this repo, unless a step says GitHub, a browser or another service.
+
+1. **Wait for CI to be green on the latest commit of `main`.** That includes the `secrets-scan` job: gitleaks over the full history, run on every push.
+2. **Make the repo public:** GitHub → the repo → Settings → General → Danger Zone → Change visibility → Public.
+3. **Make outside contributors' workflows wait for you:** Settings → Actions → General → "Approval for running fork pull request workflows from contributors" → "Require approval for all external contributors".
+4. **Create the `production` environment,** with you as the required reviewer and deployments from `main` only. Run this from any terminal where `gh` is signed in as you; 151380878 is your GitHub user id, from `gh api users/DhruvGoyal404 -q .id`:
    ```
-   git clone https://github.com/DhruvGoyal404/chitthi && cd chitthi
-   bash deploy/azure/setup.sh infra alert_email=<you@…>
+   gh api -X PUT repos/DhruvGoyal404/chitthi/environments/production --input - <<'JSON'
+   {"reviewers":[{"type":"User","id":151380878}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+   JSON
+   gh api -X POST repos/DhruvGoyal404/chitthi/environments/production/deployment-branch-policies -f name=main -f type=branch
    ```
-   Confirm the alert group's email (Azure sends one) and check it didn't land in spam.
-2. **DNS:** an A record `chitthi.dhruvgoyal.tech` pointing to the IP it prints. No AAAA record.
-3. **OAuth apps,** each with its callback on the public origin:
-   - **Google:** `https://chitthi.dhruvgoyal.tech/api/auth/google/callback`.
-   - **GitHub:** an OAuth app with homepage `https://chitthi.dhruvgoyal.tech` and callback `https://chitthi.dhruvgoyal.tech/api/auth/github/callback`.
-4. **Cloudflare R2:**
-   - **Bucket:** `chitthi-backups`, location hint Asia-Pacific.
-   - **Bucket lock rule:** the whole bucket (no prefix), 30 days.
-   - **Lifecycle rules:** delete objects under `db/`, `manifests/` and `selftest/` 35 days after upload.
-   - **API token:** "Object Read & Write", applied to this bucket only. Keep its access key id, secret and S3 endpoint for step 6.
-5. **healthchecks.io,** both checks emailing you:
-   - **`chitthi-backup`:** period 1 day, grace 2 hours (the 26-hour freshness window).
-   - **`chitthi-drill`:** cron `0 23 1 * *` UTC, grace 6 hours.
-6. **Secrets:** `bash deploy/azure/setup.sh secrets`.
-   - **Generated, if missing:** both database passwords and the backup keypair. The keypair is made in Python ([`age_keypair.py`](../deploy/azure/age_keypair.py)), because Cloud Shell has no age; CI checks it against the real age.
-   - **Asked for, with input hidden and the format checked:** the OAuth, R2 and healthchecks values.
-   - **Then keep a copy of the backup private key outside Azure,** in a password manager (the script prints the command that shows it). Without it, no backup can be read.
-7. **The host:** `bash deploy/azure/run-on-vm.sh deploy/host/bootstrap.sh`.
-8. **The edge,** once DNS resolves: `bash deploy/azure/run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=<you@…>`. To test certificate issuance first without using up Let's Encrypt's limits, add `acme_ca=staging`. Re-run without it before the first deploy: the deploy's smoke test needs a trusted certificate.
-9. **GitHub repository variables** (Settings → Secrets and variables → Actions → Variables):
-   - The ones `setup.sh infra` printed: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `VM_RG`, `VM_NAME`, `KEY_VAULT`, `BACKUP_ACCOUNT`, `BACKUP_CONTAINER`, `R2_BUCKET`, `ACME_EMAIL`.
-   - Then `DEPLOY_ENABLED=true`, which switches the deploy workflow on.
-   - None of these are secrets. With OIDC there is no stored credential.
-   - There is no GitHub environment, because private repos only get environments on paid plans (see "GitHub plan limits" below).
-10. **The first deploy:** Actions → Deploy → Run workflow (from `main`, action `deploy`). After that, every push to `main` that passes CI deploys itself.
-11. **Prove the backups are append-only** with the VM's real credentials: `bash deploy/azure/run-on-vm.sh deploy/host/backup.sh selftest`. It must pass every line.
-12. **Go-live gate:**
-    - an alert email arrives;
-    - the first nightly backup succeeds (healthchecks shows it green);
-    - a restore drill passes (`bash deploy/azure/run-on-vm.sh deploy/host/backup.sh drill`);
-    - a deliberately broken deploy rolls itself back.
+5. **Protect `main`** with a ruleset that blocks deleting it and force-pushing to it:
+   ```
+   gh api -X POST repos/DhruvGoyal404/chitthi/rulesets --input - <<'JSON'
+   {"name":"protect main","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"}]}
+   JSON
+   ```
+6. **Open Azure Cloud Shell** (Bash) and get the repo at the commit CI passed:
+   ```
+   git clone https://github.com/DhruvGoyal404/chitthi && cd chitthi && git checkout <commit>
+   ```
+7. **Create the Azure resources:** `bash deploy/azure/setup.sh infra alert_email=<you@…>`. Answer `y`. It ends with its checks (secrets still to come are listed as "todo") and prints your IP and the GitHub values. Keep that output for steps 10 and 20.
+8. **Confirm Azure's alert email:** an email from Azure Monitor saying you were added to the action group `ops-email`. If it went to spam, mark it "not spam".
+9. **DNS:** at your DNS provider, add an A record `chitthi.dhruvgoyal.tech` pointing to the IP from step 7. No AAAA record.
+10. **Google OAuth client:**
+    - Google Cloud console → APIs & Services → Credentials → Create OAuth client ID → Web application.
+    - Authorized redirect URI: `https://chitthi.dhruvgoyal.tech/api/auth/google/callback`.
+    - On the consent screen (external), publish the app. Otherwise only test users can sign in, and email/profile scopes need no verification.
+    - Keep the client ID and secret for step 15.
+11. **GitHub OAuth app:**
+    - GitHub → Settings → Developer settings → OAuth Apps → New.
+    - Homepage `https://chitthi.dhruvgoyal.tech`, callback `https://chitthi.dhruvgoyal.tech/api/auth/github/callback`.
+    - Generate a client secret, and keep both values for step 15.
+12. **Cloudflare R2:**
+    - Create the bucket `chitthi-backups` (location hint Asia-Pacific).
+    - Add a bucket lock rule: the whole bucket (no prefix), 30 days.
+    - Add lifecycle rules: delete objects under `db/`, `manifests/` and `selftest/` 35 days after upload.
+    - Create an API token, "Object Read & Write", for this bucket only. Keep its access key ID, secret and S3 endpoint for step 15.
+13. **healthchecks.io:** create two checks, then send the email integration's test ping and confirm it arrives (Integrations → Email → "Test!"):
+    - `chitthi-backup`: period 1 day, grace 2 hours.
+    - `chitthi-drill`: cron `0 23 1 * *`, time zone UTC, grace 6 hours.
+14. **Store the secrets:** `bash deploy/azure/setup.sh secrets`. It generates both database passwords and the backup key pair, then asks for each other value with your typing hidden.
+15. **Enter the values when asked:** Google (step 10), GitHub (step 11), R2 (step 12), and the two healthchecks.io ping URLs (step 13).
+16. **Keep the backup private key outside Azure:**
+    - Show it once with `az keyvault secret show --vault-name <KEY_VAULT> -n chitthi-backup-age-identity --query value -o tsv`, save it in your password manager, then `clear`.
+    - Without it, no backup can be read if the Key Vault is ever lost.
+17. **Check everything:** `bash deploy/azure/setup.sh check` must end with "all checks passed".
+18. **Set up the host:** `bash deploy/azure/run-on-vm.sh deploy/host/bootstrap.sh`. It ends with its own checks and `free -m`. Note the "used" figure: it's the real OS row of the memory budget.
+19. **Start the edge,** once `nslookup chitthi.dhruvgoyal.tech` returns your IP: `bash deploy/azure/run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=<you@…>`.
+20. **GitHub environment values:** Settings → Environments → production. Use the values from step 7.
+    - **Secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `KEY_VAULT`, `BACKUP_ACCOUNT`, `R2_BUCKET` (`chitthi-backups`), `ACME_EMAIL`.
+    - **Variables:** `VM_RG`, `VM_NAME`, `BACKUP_CONTAINER`.
+21. **Switch deploys on:** Settings → Secrets and variables → Actions → Variables → New repository variable `DEPLOY_ENABLED` = `true`.
+22. **First deploy:**
+    - Actions → Deploy → Run workflow (branch `main`, action `deploy`).
+    - When it pauses, open the run and press "Review deployments" → Approve.
+    - It must end green, with every line of "Check the site from the outside" ok.
+23. **Try it yourself:** open `https://chitthi.dhruvgoyal.tech` in two browsers. Sign in with Google in one and GitHub in the other, start a DM, and send messages and a photo.
+24. **Prove the backups are append-only:** `bash deploy/azure/run-on-vm.sh deploy/host/backup.sh selftest`. Every line must say ok.
+25. **First backup, now rather than tonight:** `bash deploy/azure/run-on-vm.sh deploy/host/backup.sh run`. healthchecks.io must show `chitthi-backup` green.
+26. **First restore drill:** `bash deploy/azure/run-on-vm.sh deploy/host/backup.sh drill`. `chitthi-drill` must turn green.
+27. **UptimeRobot** (free plan):
+    - Add a monitor of type Keyword on `https://chitthi.dhruvgoyal.tech/api/health`. Keyword `"db":"ok"`, alert when the keyword does not exist, every 5 minutes. Alert contact: your email; confirm the address when UptimeRobot asks.
+    - **Test alert:** change the keyword to `"db":"never"`, wait for the "down" email (up to about 10 minutes), then set it back to `"db":"ok"` and wait for the "up" email.
+    - If your plan offers SSL-expiry reminders on the monitor, turn them on, 14 days ahead. Either way the VM checks the certificate every night: the `chitthi-backup` check turns red with 14 days left.
+28. **Test Azure's alert email:** Portal → Monitor → Alerts → Action groups → `ops-email` → Test action group → Email. The email must arrive.
+29. **Rehearse a broken deploy:**
+    - Actions → Deploy → Run workflow (branch `main`, action `rehearse-rollback`), then approve.
+    - It deploys a release whose API can't start. The run must end green, with "the broken release failed and rolled itself back" and the outside check ok.
+    - Afterwards, the rollback point is the release that's running. The next real deploy sets a new one.
+30. **Calendar:**
+    - 2026-10-26: the zod upgrade. 2026-11-06: the body-parser upgrade ("Pending dependency upgrades").
+    - Every month after the drill email: the media compaction ("Backups").
+    - The first time Azure bills you: a look at Cost Management.
+
+That's go-live. From now on, every push to `main` that passes CI and changes more than docs waits for your approval, then deploys itself.
 
 **Things only the real run can prove,** because CI has no Azure account:
 - the deploy identity's role is enough for managed Run Command (create, show, delete);
@@ -174,33 +217,25 @@ prints its output, and exits with its exit code. Afterwards it deletes the run c
 
 **Arguments** aren't secret. They travel inside the script, limited to `[A-Za-z0-9@._:/=+-]`: named Run Command parameters would become environment variables, and these scripts take `key=value` arguments. The instance view keeps the last 4 KB of output.
 
-### GitHub plan limits (the repo is private)
+### GitHub: a public repo
 
-The repo and its images stay private (decided 2026-10-24). On GitHub Free, a private repo gets:
+The repo is public (decided 2026-10-24). That brings unmetered Actions minutes for standard runners, environments and rulesets on the Free plan. Before the flip, the whole history was scanned with gitleaks (v8.30.1): three findings, all made-up test values in `api/test/oauth.db.test.ts`, are recorded in `.gitleaksignore`. The tracked files were searched for account, subscription and tenant IDs, emails, IPs, keys and service URLs, and nothing was found:
+- Azure resource names derive from the subscription when `setup.sh` runs, and are never committed.
+- The only addresses are loopback, Azure's documented platform addresses, private ranges and RFC 5737 documentation addresses in tests.
+- CI's `secrets-scan` job runs gitleaks over the full history on every push.
 
-- **No branch protection or rulesets.** Nothing technically stops a push straight to `main`. Anyone with write access can push, and therefore deploy: CI must pass first, but nobody has to review. Today that is only you.
-- **No environments** (no required reviewers, no environment-scoped variables). So the deploy trusts `main`, not an environment, which works on any plan. On GitHub Pro (free with the GitHub Student Developer Pack), you could add an environment with required reviewers. That means `environment: production` on the deploy job, plus a federated credential with the subject `repo:DhruvGoyal404/chitthi:environment:production` in `setup.sh`.
-- **2,000 Actions minutes a month** (Pro: 3,000). Linux minutes count once. Each job is rounded up to a whole minute.
+What protects deploys now:
+- **The `production` environment:** each deploy job waits until you approve it, and only runs from `main`. Azure's federated credential trusts only `repo:DhruvGoyal404/chitthi:environment:production`, so no other job, branch or workflow can sign in.
+- **Account identifiers are environment secrets,** not variables: the client, tenant and subscription IDs, the Key Vault and storage names, the bucket and your email. Actions logs are public, and secrets are masked in them. Only resource-group, VM and container names are plain variables.
+- **A ruleset on `main`** forbids deleting it and force-pushing to it.
+- **Workflows from outside contributors' pull requests** wait for your approval, and run with a read-only token, without the environment or its secrets.
 
-To see your plan, open github.com/settings/billing.
+**Actions minutes** are free for a public repo. For reference, a CI run on code is about 14 job-minutes and a deploy about 10.
 
-**Measured cost per push to `main`:**
-- **CI: 14 billed minutes,** from two runs on 2026-10-24: images 6, e2e 4, checks 3, perf 1.
-- **Deploy: about 10, estimated** (build about 5, deploy and outside check about 5). It will be measured at the first deploy.
-- **Total: about 24 minutes per push to `main`.** A pull request costs CI's 14.
-
-| Pace | Minutes a month | Free (2,000) | Pro (3,000) |
-|---|---|---|---|
-| This week's pace: about 11 CI runs a day, 2026-10-19 to 24 | about 4,600 (CI alone) | over 2.3× | over 1.5× |
-| 3 pushes a day after go-live | about 2,200 | over | fits |
-| 1 push a day | about 720 | fits | fits |
-
-- **Break-even:** about 83 pushes to `main` a month on Free (under 3 a day), about 125 on Pro.
-- **At the cap,** with no payment method, Actions stops until the month resets: no CI and no deploys. The site keeps running, and a rollback still works from Cloud Shell (`run-on-vm.sh deploy/host/deploy.sh rollback`).
-- **Ways to stretch the minutes,** not yet applied:
-  - skip the `images` and `perf` jobs when only docs change (`paths-ignore`);
-  - push batches instead of single commits;
-  - keep the perf job to `main`.
+**Docs-only changes** (`docs/`, `*.md`) skip CI's `images` and `perf` jobs, and so the deploy:
+- CI's `changes` job diffs the push against what came before. A new branch or a force push counts as code.
+- The deploy's `gate` job deploys only if CI's `images` job passed for that commit.
+- On `main`, CI runs are no longer cancelled by a newer push, so a code push followed quickly by a docs push still deploys.
 
 ### What it costs
 
@@ -271,15 +306,20 @@ bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh smoke
 
 **The deploy workflow** ([`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)):
 - **When it runs:**
-  - after CI passes on a push to `main`;
-  - or by hand from Actions → Deploy, with the action `deploy`, `rollback` or `smoke`.
+  - after CI passes on a push to `main` whose `images` job ran (docs-only pushes skip it, and so the deploy);
+  - or by hand from Actions → Deploy, with the action `deploy`, `rollback`, `smoke` or `rehearse-rollback`.
+- **`rehearse-rollback`** first checks that the site is healthy. It then deploys this commit with an API image that exits at once. That deploy must fail and roll itself back, after which the outside check must pass. It is the go-live gate's "a broken deploy rolls itself back", proven on the real VM.
+- **The gate job** asks CI whether its `images` job passed for the commit. It has `actions: read` only.
 - **The build job:**
   - builds the three images at exactly the CI-tested commit;
   - runs `scripts/check-images.sh` on them;
   - pushes them to GHCR and passes their `@sha256` references on.
-- **The two jobs' token permissions:**
+- **The jobs' token permissions:**
 
   ```yaml
+  gate:               # reads CI's job results
+    permissions:
+      actions: read
   build:              # pushes the images; its token never leaves GitHub's runner
     permissions:
       contents: read
@@ -291,13 +331,14 @@ bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh smoke
       id-token: write # lets the job ask GitHub for an OIDC token for Azure; adds no scope to GITHUB_TOKEN
   ```
 
-  The workflow's default is `permissions: {}`. `deploy/azure/test_azure_tools.py` asserts all three blocks, and that only deploy-job steps pass a token to `run-on-vm.sh`.
-- **The deploy job** runs only for `main`:
-  - It signs in to Azure as `chitthi-deploy` by OIDC. No credential is stored anywhere. Azure trusts only tokens for `repo:DhruvGoyal404/chitthi:ref:refs/heads/main`, and the identity can only use managed Run Command on the VM.
+  The workflow's default is `permissions: {}`. `deploy/azure/test_azure_tools.py` asserts every block, the environment, and that only deploy-job steps pass a token to `run-on-vm.sh`.
+- **The deploy job** runs in the `production` environment, from `main`, once you approve it:
+  - It signs in to Azure as `chitthi-deploy` by OIDC. No credential is stored anywhere. Azure trusts only tokens for `repo:DhruvGoyal404/chitthi:environment:production`, and the identity can only use managed Run Command on the VM.
+  - Account identifiers come from environment secrets, which are masked in the public logs.
   - It runs `edge.sh` (a no-op unless `deploy/edge` changed), then `deploy.sh`.
   - It then runs [`deploy/azure/public-check.sh`](../deploy/azure/public-check.sh) from the internet. It checks health, at least 14 days left on the certificate, the headers, the redirect, the Origin refusals, and that ports 22, 5432, 5435, 8082 and 5175 are closed.
   - The check runs after a failed deploy too, so the log shows what the rolled-back site serves.
-- **The repo and images are private.**
+- **The VM signs in to GitHub per deploy.** The repo is public, but its GHCR images may stay private (a package's visibility is its own setting), and the scripts work either way.
   - The deploy job hands the VM its own `GITHUB_TOKEN` (contents:read, packages:read) through `run-on-vm.sh`, as a managed Run Command **protected parameter**. It reaches the script as an environment variable and is never an argument or part of the script text.
   - `deploy.sh` and `edge.sh` use it for the GitHub contents API and a throwaway Docker login under their scratch folder.
   - GitHub revokes the token when the job ends, so the copy Run Command keeps on the VM (root-only) is dead within minutes.
@@ -506,10 +547,13 @@ Everything below emails you. Each row says what it means and where to start; "In
 | `chitthi-backup` down | healthchecks.io | Last night's backup failed (the reason is in the ping), didn't run, or `/data` is 80 % full | "A backup alert" |
 | `chitthi-drill` down | healthchecks.io | The monthly restore drill failed or didn't run | "A backup alert" |
 | Deploy workflow failed | GitHub (email on failed runs) | A deploy failed and rolled back, or the outside check failed | "A deploy failed" |
+| A deploy is waiting for review | GitHub (the `production` environment) | A push to `main` passed CI and wants to deploy | Approve it, or reject it to skip that commit |
+| UptimeRobot "down" | UptimeRobot, every 5 minutes from outside | `/api/health` didn't answer with `"db":"ok"`: the site, the API or its database is down, or the network path is broken | "The site is down, the VM is up" (or "The VM is down", if Azure alerted too) |
+| `chitthi-backup` down, "the TLS certificate expires within 14 days" | The nightly backup, on the VM | Caddy's renewal has failed for over two weeks (it renews 30 days ahead) | "The certificate is about to expire" |
 
-**A known gap: no outside uptime check between deploys.** If the API or Caddy dies while the VM is fine, no alert fires until someone notices or the next deploy's outside check runs. Certificate renewal is the same: Caddy renews 30 days ahead, and only a deploy's check, which wants 14+ days left, would notice a failure.
-
-The fix, before go-live: a free external monitor on `https://chitthi.dhruvgoyal.tech/api/health` that expects `{"status":"ok","db":"ok"}` and watches the certificate's expiry. UptimeRobot's free plan, for example. It only reads the health endpoint and never carries chat traffic.
+**Between deploys, two monitors watch the site:**
+- **UptimeRobot** watches the site from outside, set up in step 27 of "Going live", with a test alert. It only reads the health endpoint and never carries chat traffic.
+- **The nightly backup run** checks the certificate the VM serves, in case UptimeRobot's free plan has no SSL-expiry reminders.
 
 ## Secret rotation
 
@@ -587,6 +631,14 @@ Start with `bash deploy/azure/run-on-vm.sh deploy/host/status.sh`. It shows memo
 2. If it broke at a deploy, roll back: Actions → Deploy → `rollback`, or `run-on-vm.sh deploy/host/deploy.sh rollback`.
 3. Otherwise, redeploy the current commit (Actions → Deploy → `deploy`). That rewrites config and env files, and restarts everything that's down.
 
+**The certificate is about to expire.** Caddy normally renews it 30 days ahead.
+1. Read the edge's log through a small script: `docker compose -p edge --project-directory /srv/edge logs --since 24h caddy`.
+2. The usual causes:
+   - DNS no longer points to the VM;
+   - port 80 is closed (the ACME HTTP challenge needs it);
+   - Let's Encrypt rate limits after repeated failed attempts.
+3. Fix the cause, then reload the edge: `run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=…`, or restart it.
+
 **A deploy failed.** The workflow log shows which step failed. After the switch, a failure rolls back by itself, and the outside check then shows what's being served. Fix forward with a new commit.
 
 Migrations never roll back. A migration that broke the previous release breaks the expand-then-contract rule ("Deploy and rollback"). Repair the schema with a new migration, or as a last resort restore the pre-deploy dump (`/data/chitthi/pre-deploy/`) with `pg_restore` through a script.
@@ -623,11 +675,13 @@ At worst you lose everything since last night's backup (02:00 IST).
   3. Rotate every secret.
   4. The backups can't have been altered from the VM: Azure's copy is create-only, and R2 is locked for 30 days.
 - **An unexpected role assignment:** remove it (`az role assignment delete`), then run `setup.sh check`, which fails while any identity holds more than its roles.
-- **Your GitHub account:** revoke your sessions. Then check the federated credential (`setup.sh check`) and the repository variables.
+- **Your GitHub account:**
+  1. Revoke your sessions and tokens.
+  2. Check the `production` environment: its reviewers and its branch policy.
+  3. Check the ruleset on `main`, then the federated credential (`setup.sh check`).
+  4. Every deploy needs your approval, so an attacker with a stolen session could approve one. Revoke first.
 
-**Over budget or out of Actions minutes:**
-- **Azure:** Cost Management shows which resource. `az vm deallocate -g apps-host -n apps-vm` stops the VM's compute charges, and the site goes down.
-- **GitHub Actions minutes:** with none left, CI and deploys stop until the month resets ("GitHub plan limits"). The site keeps running, and Cloud Shell can still roll back.
+**Over budget:** Cost Management shows which resource. `az vm deallocate -g apps-host -n apps-vm` stops the VM's compute charges, and the site goes down.
 
 ## Pending dependency upgrades
 
