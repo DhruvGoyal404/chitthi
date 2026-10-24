@@ -66,10 +66,10 @@ jobs:
         run: npm run build
       - name: Bundle budget
         run: npm run check:bundle
+      # High and above fails, except advisories in audit-exceptions.json, each only until the day
+      # its fix clears the 14-day release rule (scripts/audit.sh).
       - name: Audit (high and above)
-        run: |
-          set -o pipefail
-          npm audit --audit-level=high 2>&1 | tee audit.log
+        run: scripts/audit.sh
 
   images:
     # The production images (api/Dockerfile, web/Dockerfile), built on every push and checked on
@@ -84,7 +84,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Shellcheck
-        run: shellcheck scripts/check-images.sh deploy/smoke/smoke.sh deploy/host/*.sh deploy/azure/*.sh
+        run: shellcheck scripts/check-images.sh scripts/audit.sh deploy/smoke/smoke.sh deploy/host/*.sh deploy/azure/*.sh
       - name: Build the API image
         run: docker build -f api/Dockerfile --target api -t chitthi-api:ci .
       - name: Build the migrate image

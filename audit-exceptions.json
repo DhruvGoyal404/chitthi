@@ -1,0 +1,14 @@
+[
+  {
+    "id": "GHSA-27r3-jxmh-p828",
+    "package": "body-parser",
+    "expires": "2026-11-05",
+    "reason": "The fix (body-parser 2.4.0, 2026-10-22) is inside the 14-day window until 2026-11-05. Mitigated meanwhile: express.json refuses compressed bodies (inflate: false), tested in api/test/process.test.ts."
+  },
+  {
+    "id": "GHSA-mrhx-c7xc-m3w5",
+    "package": "zod",
+    "expires": "2026-10-25",
+    "reason": "The fix (zod 4.6.6, 2026-10-11) is inside the 14-day window until 2026-10-25. Needs an array schema without a length limit; every request array has .max(), and bodies are capped at 100 KB."
+  }
+]

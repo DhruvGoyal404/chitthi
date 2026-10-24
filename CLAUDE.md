@@ -42,6 +42,7 @@ These hold for every change. A change that breaks one of them is a bug, even if 
    - CI installs with `npm ci`.
    - Any piped CI step starts with `set -o pipefail`.
    - To add or upgrade a package: `npm install --save-exact --before=<today minus 14 days> <pkg>@<version>`. The `--before` flag also holds back transitive dependencies.
+   - **A high or critical advisory whose fix is younger than 14 days** gets a dated entry in `audit-exceptions.json`. The entry expires on the day the fix becomes adoptable, and `scripts/audit.sh` (the CI audit step) fails again from that day. Mitigate in the meantime where possible, and upgrade on that day. Never break the 14-day rule for it.
 
 ## Coexistence rules (shared machine)
 
