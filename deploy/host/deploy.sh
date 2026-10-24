@@ -54,7 +54,7 @@ trap 'rm -rf -- "$work"' EXIT
 gh_token=${CHITTHI_GITHUB_TOKEN:-}
 unset CHITTHI_GITHUB_TOKEN
 if [[ -n $gh_token ]]; then
-  [[ $gh_token =~ ^gh[a-z]_[A-Za-z0-9_]+$ ]] || die "CHITTHI_GITHUB_TOKEN is not a GitHub token"
+  [[ $gh_token =~ ^[A-Za-z0-9_.-]{20,}$ ]] || die "CHITTHI_GITHUB_TOKEN does not look like a GitHub token"
   printf 'Authorization: Bearer %s\n' "$gh_token" > "$work/gh-auth"
 fi
 fetch() { # <path in the repo> <sha> <output file>

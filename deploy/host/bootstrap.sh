@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepares an Ubuntu 24.04 VM to host Chitthi (and, later, the second app) behind the edge Caddy.
 # Run as root, through Azure Run Command:
-#   az vm run-command invoke -g <rg> -n <vm> --command-id RunShellScript --scripts @deploy/host/bootstrap.sh
+#   deploy/azure/run-on-vm.sh deploy/host/bootstrap.sh       (managed Run Command, from Cloud Shell)
 # Idempotent: run it again after any change to this file; it converges and re-verifies.
 #
 #   DATA_DEVICE  the data disk (default: Azure's LUN 0 link). CI passes a loop device.

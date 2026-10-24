@@ -110,55 +110,146 @@ class Compaction(unittest.TestCase):
 
 
 FAKE_AZ = r"""#!/usr/bin/env bash
-# Stands in for `az vm run-command invoke`: runs the payload with sh, answers in Run Command's shape.
-for a in "$@"; do case $a in @*) f=${a#@} ;; esac; done
-out=$(sh "$f" 2>/dev/null)
-jq -n --arg m "Enable succeeded: $(printf '\n[stdout]\n%s\n\n[stderr]\n' "$out")" '{value: [{message: $m}]}'
+# Stands in for az: `vm show` and managed Run Command (`vm run-command create|show|delete`).
+# Logs every invocation's arguments, one per line, to $FAKE_AZ_STATE/args.log. `create` runs the
+# script with sh, with each --protected-parameters NAME=value in its environment, as on Linux.
+# FAKE_AZ_LEAK=1 makes `show` echo the protected parameters back, as a broken API would.
+state=${FAKE_AZ_STATE:?}
+{ printf '%s\n' "$@"; echo ---; } >> "$state/args.log"
+case "$1 $2 ${3:-}" in
+  "vm show "*) echo centralindia ;;
+  "vm run-command create")
+    shift 3
+    script= penv=()
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --script) script=${2#@}; shift ;;
+        --protected-parameters) penv+=("$2"); shift ;;
+      esac
+      shift
+    done
+    set +e
+    out=$(env "${penv[@]}" sh "$script" 2>/dev/null); rc=$?
+    leak=
+    [ -n "${FAKE_AZ_LEAK:-}" ] && leak="${penv[*]}"
+    jq -n --arg o "$out" --argjson rc "$rc" --arg leak "$leak" --rawfile s "$script" \
+      '{source: {script: $s}, protectedParameters: (if $leak == "" then null else [$leak] end),
+        instanceView: {output: $o, error: "", exitCode: $rc, executionState: (if $rc == 0 then "Succeeded" else "Failed" end)}}' > "$state/view.json"
+    ;;
+  "vm run-command show") cat "$state/view.json" ;;
+  "vm run-command delete") echo deleted >> "$state/deleted" ;;
+  *) echo "fake az: unexpected $*" >&2; exit 2 ;;
+esac
 """
 
 
 @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "needs bash and jq")
 class RunOnVm(unittest.TestCase):
-    def run_on_vm(self, tmp, *args):
-        env = {**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"]}
+    TOKEN = "ghs_" + "A1b2" * 9
+
+    def run_on_vm(self, tmp, body, *args, token=None, leak=False):
+        with open(os.path.join(tmp, "az"), "w", newline="\n") as f:
+            f.write(FAKE_AZ)
+        os.chmod(os.path.join(tmp, "az"), 0o755)
+        with open(os.path.join(tmp, "s.sh"), "w", newline="\n") as f:
+            f.write(body)
+        env = {**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"], "FAKE_AZ_STATE": tmp}
+        env.pop("RUN_ON_VM_GITHUB_TOKEN", None)
+        if token is not None:
+            env["RUN_ON_VM_GITHUB_TOKEN"] = token
+        if leak:
+            env["FAKE_AZ_LEAK"] = "1"
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-on-vm.sh")
-        return subprocess.run([shutil.which("bash"), script, *args], capture_output=True, text=True, env=env)
+        return subprocess.run([shutil.which("bash"), script, os.path.join(tmp, "s.sh"), *args], capture_output=True, text=True, env=env)
+
+    def calls(self, tmp):
+        with open(os.path.join(tmp, "args.log"), encoding="utf-8") as f:
+            return [c.strip("\n").split("\n") for c in f.read().split("---\n") if c.strip()]
 
     def test_arguments_text_and_exit_code_come_through(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "az"), "w", newline="\n") as f:
-                f.write(FAKE_AZ)
-            os.chmod(os.path.join(tmp, "az"), 0o755)
-            with open(os.path.join(tmp, "s.sh"), "w", newline="\n") as f:
-                f.write('echo "args: $*"\necho \'literal: $HOME `x`\'\nexit 3')  # no trailing newline
-            r = self.run_on_vm(tmp, os.path.join(tmp, "s.sh"), "deploy", "sha=ab12", "api=ghcr.io/o/r@sha256:00", "acme_email=a@b.c")
+            body = 'echo "args: $*"\necho \'literal: $HOME `x`\'\nexit 3'  # no trailing newline
+            r = self.run_on_vm(tmp, body, "deploy", "sha=ab12", "api=ghcr.io/o/r@sha256:00", "acme_email=a@b.c")
             self.assertEqual(r.returncode, 3, r.stderr)
             self.assertIn("args: deploy sha=ab12 api=ghcr.io/o/r@sha256:00 acme_email=a@b.c", r.stdout)
             self.assertIn("literal: $HOME `x`", r.stdout)
-            r = self.run_on_vm(tmp, os.path.join(tmp, "s.sh"), "x;reboot")
+            self.assertTrue(os.path.exists(os.path.join(tmp, "deleted")), "the run command resource was not deleted")
+            create = next(c for c in self.calls(tmp) if c[:3] == ["vm", "run-command", "create"])
+            self.assertNotIn("--parameters", create)  # arguments travel in the script, never as parameters
+            self.assertNotIn("--protected-parameters", create)  # nothing secret was given
+            r = self.run_on_vm(tmp, body, "x;reboot")
             self.assertEqual(r.returncode, 1)
             self.assertIn("refuses to pass", r.stderr)
 
-    def test_the_github_token_arrives_as_an_environment_variable_only(self):
-        token = "ghs_" + "A1b2" * 9
+    def test_the_token_goes_only_in_protected_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "az"), "w", newline="\n") as f:
-                f.write(FAKE_AZ)
-            os.chmod(os.path.join(tmp, "az"), 0o755)
-            with open(os.path.join(tmp, "s.sh"), "w", newline="\n") as f:
-                f.write('[ "$CHITTHI_GITHUB_TOKEN" = "%s" ] && echo token-arrived\necho "args: $*"\n' % token)
-            env = {**os.environ, "RUN_ON_VM_GITHUB_TOKEN": token}
-            r = subprocess.run([shutil.which("bash"), os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-on-vm.sh"),
-                                os.path.join(tmp, "s.sh"), "deploy"], capture_output=True, text=True,
-                               env={**env, "PATH": tmp + os.pathsep + env["PATH"]})
+            # The script compares against the token's sha256, so its own text doesn't hold the token.
+            digest = __import__("hashlib").sha256(self.TOKEN.encode()).hexdigest()
+            body = ('[ "$(printf %%s "$CHITTHI_GITHUB_TOKEN" | sha256sum | cut -d" " -f1)" = "%s" ] && echo token-arrived\n'
+                    'echo "args: $*"\n') % digest
+            r = self.run_on_vm(tmp, body, "deploy", token=self.TOKEN)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("token-arrived", r.stdout)
             self.assertIn("args: deploy", r.stdout)
-            self.assertNotIn(token, r.stdout + r.stderr)
-            env["RUN_ON_VM_GITHUB_TOKEN"] = "not a token; reboot"
-            r = subprocess.run([shutil.which("bash"), os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-on-vm.sh"),
-                                os.path.join(tmp, "s.sh")], capture_output=True, text=True, env=env)
+            self.assertNotIn(self.TOKEN, r.stdout + r.stderr)
+            # Across every az call: the token appears exactly once, right after --protected-parameters.
+            seen = 0
+            for call in self.calls(tmp):
+                for i, a in enumerate(call):
+                    if self.TOKEN in a:
+                        self.assertEqual(call[i - 1], "--protected-parameters", call[:3])
+                        self.assertEqual(a, "CHITTHI_GITHUB_TOKEN=" + self.TOKEN)
+                        seen += 1
+            self.assertEqual(seen, 1)
+            # What Azure would store and show: the script text and the instance view.
+            with open(os.path.join(tmp, "view.json"), encoding="utf-8") as f:
+                self.assertNotIn(self.TOKEN, f.read())
+
+    def test_a_token_returned_by_the_api_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.run_on_vm(tmp, "echo hi\n", token=self.TOKEN, leak=True)
             self.assertEqual(r.returncode, 1)
+            self.assertIn("came back from the API", r.stderr)
+            self.assertNotIn(self.TOKEN, r.stdout + r.stderr)
+
+    def test_a_malformed_token_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.run_on_vm(tmp, "echo should-not-run\n", token="not a token; reboot")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("doesn't look like a GitHub token", r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "args.log")), "az was called")
+
+
+def _has_yaml():
+    try:
+        import yaml  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(os.environ.get("REQUIRE_YAML") == "1" or _has_yaml(), "needs PyYAML")
+class DeployWorkflow(unittest.TestCase):
+    """The token handed to the VM comes from a job that can only read; the job that pushes images
+    never hands its token anywhere."""
+
+    def test_permissions(self):
+        import yaml
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+        with open(os.path.join(root, ".github", "workflows", "deploy.yml"), encoding="utf-8") as f:
+            wf = yaml.safe_load(f)
+        self.assertEqual(wf["permissions"], {})
+        build, deploy = wf["jobs"]["build"], wf["jobs"]["deploy"]
+        self.assertEqual(build["permissions"], {"contents": "read", "packages": "write"})
+        # id-token lets the job request an OIDC token for Azure; it adds no scope to GITHUB_TOKEN.
+        self.assertEqual(deploy["permissions"], {"contents": "read", "packages": "read", "id-token": "write"})
+        build_text = yaml.safe_dump(build)
+        self.assertNotIn("RUN_ON_VM_GITHUB_TOKEN", build_text)
+        self.assertNotIn("run-on-vm", build_text)
+        handed = [s for s in deploy["steps"] if "RUN_ON_VM_GITHUB_TOKEN" in (s.get("env") or {})]
+        self.assertTrue(handed)
+        for s in handed:
+            self.assertEqual(s["env"]["RUN_ON_VM_GITHUB_TOKEN"], "${{ github.token }}")
 
 
 if __name__ == "__main__":

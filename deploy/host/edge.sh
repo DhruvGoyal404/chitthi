@@ -44,7 +44,7 @@ trap 'rm -rf -- "$work"' EXIT
 # job ends) arrives in CHITTHI_GITHUB_TOKEN and goes only into a 0600 header file. Without it the
 # files are fetched anonymously (a public repo).
 if [[ -n ${CHITTHI_GITHUB_TOKEN:-} ]]; then
-  [[ $CHITTHI_GITHUB_TOKEN =~ ^gh[a-z]_[A-Za-z0-9_]+$ ]] || die "CHITTHI_GITHUB_TOKEN is not a GitHub token"
+  [[ $CHITTHI_GITHUB_TOKEN =~ ^[A-Za-z0-9_.-]{20,}$ ]] || die "CHITTHI_GITHUB_TOKEN does not look like a GitHub token"
   printf 'Authorization: Bearer %s\n' "$CHITTHI_GITHUB_TOKEN" > "$work/gh-auth"
 fi
 unset CHITTHI_GITHUB_TOKEN

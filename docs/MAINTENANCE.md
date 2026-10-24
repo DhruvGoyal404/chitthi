@@ -50,7 +50,7 @@ replaces a stored secret.
 | | Budget | `apps-host`, monthly, for the whole subscription. Default ₹700 (pass `budget=` if the billing currency isn't INR). Email at 50, 80 and 100 % actual, and at 100 % forecast. |
 | `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS. Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
 | | Key Vault `chitthi-kv-<6 hex>` | Standard, RBAC, purge protection, 90-day soft delete, delete lock. |
-| | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404/chitthi:environment:production`. |
+| | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404/chitthi:ref:refs/heads/main`. |
 
 The `<6 hex>` suffix comes from the subscription id, so every run finds the same names.
 
@@ -60,7 +60,7 @@ The `<6 hex>` suffix comes from the subscription id, so every run finds the same
 |---|---|---|
 | The VM | `Blob create-only writer` (custom: `blobs/read` and `blobs/add/action`, no `write` or `delete`) | the `backups` container |
 | The VM | Key Vault Secrets User | the vault |
-| `chitthi-deploy` | `VM Run Command operator` (custom: `virtualMachines/read` and `runCommand/action`) | the VM |
+| `chitthi-deploy` | `VM Run Command operator` (custom: `virtualMachines/read` and managed Run Command's `runCommands/read`, `write` and `delete`; not the older `runCommand/action`) | the VM |
 | You | Key Vault Secrets Officer | the vault |
 | You | Storage Blob Data Contributor, for the monthly compaction | the `backups` container |
 
@@ -92,10 +92,11 @@ The `<6 hex>` suffix comes from the subscription id, so every run finds the same
    - **Then keep a copy of the backup private key outside Azure,** in a password manager (the script prints the command that shows it). Without it, no backup can be read.
 7. **The host:** `bash deploy/azure/run-on-vm.sh deploy/host/bootstrap.sh`.
 8. **The edge,** once DNS resolves: `bash deploy/azure/run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=<you@…>`. To test certificate issuance first without using up Let's Encrypt's limits, add `acme_ca=staging`. Re-run without it before the first deploy: the deploy's smoke test needs a trusted certificate.
-9. **GitHub:**
-   - Create the environment `production`, with deployments allowed from `main` only.
-   - Set the variables `setup.sh infra` printed: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `VM_RG`, `VM_NAME`, `KEY_VAULT`, `BACKUP_ACCOUNT`, `BACKUP_CONTAINER`, `R2_BUCKET`, `ACME_EMAIL`. Put them on the environment, not the repository: only the deploy job can read them. Then one repository variable, `DEPLOY_ENABLED=true`, switches the workflow on (a job's condition can't see environment variables).
+9. **GitHub repository variables** (Settings → Secrets and variables → Actions → Variables):
+   - The ones `setup.sh infra` printed: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `VM_RG`, `VM_NAME`, `KEY_VAULT`, `BACKUP_ACCOUNT`, `BACKUP_CONTAINER`, `R2_BUCKET`, `ACME_EMAIL`.
+   - Then `DEPLOY_ENABLED=true`, which switches the deploy workflow on.
    - None of these are secrets. With OIDC there is no stored credential.
+   - There is no GitHub environment, because private repos only get environments on paid plans (see "GitHub plan limits" below).
 10. **The first deploy:** Actions → Deploy → Run workflow (from `main`, action `deploy`). After that, every push to `main` that passes CI deploys itself.
 11. **Prove the backups are append-only** with the VM's real credentials: `bash deploy/azure/run-on-vm.sh deploy/host/backup.sh selftest`. It must pass every line.
 12. **Go-live gate:**
@@ -105,7 +106,8 @@ The `<6 hex>` suffix comes from the subscription id, so every run finds the same
     - a deliberately broken deploy rolls itself back.
 
 **Things only the real run can prove,** because CI has no Azure account:
-- the deploy identity's Run Command role is enough for `az vm run-command invoke`;
+- the deploy identity's role is enough for managed Run Command (create, show, delete);
+- the protected parameter arrives as `CHITTHI_GITHUB_TOKEN` (the wrapper exits 97 if it doesn't);
 - budgets work on this subscription type (the script fails loudly if they don't);
 - B2ats v2 is offered in Central India to this subscription.
 
@@ -114,11 +116,51 @@ The `<6 hex>` suffix comes from the subscription id, so every run finds the same
 ### Running scripts on the VM
 
 [`deploy/azure/run-on-vm.sh`](../deploy/azure/run-on-vm.sh) `<script> [arguments…]` runs one of
-this repo's host scripts as root through Run Command. It prints the output and exits with the
-script's exit code. Plain `az vm run-command invoke` reports success whatever the script returned,
-and on Linux it may pass `name=value` parameters as environment variables rather than arguments,
-so the wrapper carries the arguments itself. Arguments are limited to `[A-Za-z0-9@._:/=+-]`.
-Run Command keeps only the last 4096 bytes of output.
+this repo's host scripts as root through **managed** Run Command (`az vm run-command create`),
+prints its output, and exits with its exit code. Afterwards it deletes the run command resource.
+
+**Why managed, not the older action Run Command (`az vm run-command invoke`):**
+- **Secrets.** Managed Run Command has `protectedParameters`, the field Microsoft documents for "passing secrets (parameters, passwords) in a secure manner". The action API has no protected parameters: anything secret would sit in the script or the parameters, which are stored and shown.
+  - The deploy workflow's GitHub token travels only as the protected parameter `CHITTHI_GITHUB_TOKEN`. On Linux that reaches the script as an environment variable.
+  - After every run, `run-on-vm.sh` fetches the run command's whole resource view, instance view included, and fails if the token appears anywhere in it.
+  - On the VM, the wrapper stops before the script if the protected parameter didn't arrive.
+- **Exit codes.** The instance view reports the script's real exit code; `invoke` reports success whatever happened.
+
+**Tested in CI** (`deploy/azure/test_azure_tools.py`, against a stand-in `az` that logs every call):
+- the token appears in exactly one argument of all the `az` calls, right after `--protected-parameters`;
+- it is in neither the script text nor the stored view, nor in any output;
+- a view that returns the token fails the run;
+- a malformed token is refused before `az` is called.
+
+**Arguments** aren't secret. They travel inside the script, limited to `[A-Za-z0-9@._:/=+-]`: named Run Command parameters would become environment variables, and these scripts take `key=value` arguments. The instance view keeps the last 4 KB of output.
+
+### GitHub plan limits (the repo is private)
+
+The repo and its images stay private (decided 2026-10-24). On GitHub Free, a private repo gets:
+
+- **No branch protection or rulesets.** Nothing technically stops a push straight to `main`. Anyone with write access can push, and therefore deploy: CI must pass first, but nobody has to review. Today that is only you.
+- **No environments** (no required reviewers, no environment-scoped variables). So the deploy trusts `main`, not an environment, which works on any plan. On GitHub Pro (free with the GitHub Student Developer Pack), you could add an environment with required reviewers. That means `environment: production` on the deploy job, plus a federated credential with the subject `repo:DhruvGoyal404/chitthi:environment:production` in `setup.sh`.
+- **2,000 Actions minutes a month** (Pro: 3,000). Linux minutes count once. Each job is rounded up to a whole minute.
+
+To see your plan, open github.com/settings/billing.
+
+**Measured cost per push to `main`:**
+- **CI: 14 billed minutes,** from two runs on 2026-10-24: images 6, e2e 4, checks 3, perf 1.
+- **Deploy: about 10, estimated** (build about 5, deploy and outside check about 5). It will be measured at the first deploy.
+- **Total: about 24 minutes per push to `main`.** A pull request costs CI's 14.
+
+| Pace | Minutes a month | Free (2,000) | Pro (3,000) |
+|---|---|---|---|
+| This week's pace: about 11 CI runs a day, 2026-10-19 to 24 | about 4,600 (CI alone) | over 2.3× | over 1.5× |
+| 3 pushes a day after go-live | about 2,200 | over | fits |
+| 1 push a day | about 720 | fits | fits |
+
+- **Break-even:** about 83 pushes to `main` a month on Free (under 3 a day), about 125 on Pro.
+- **At the cap,** with no payment method, Actions stops until the month resets: no CI and no deploys. The site keeps running, and a rollback still works from Cloud Shell (`run-on-vm.sh deploy/host/deploy.sh rollback`).
+- **Ways to stretch the minutes,** not yet applied:
+  - skip the `images` and `perf` jobs when only docs change (`paths-ignore`);
+  - push batches instead of single commits;
+  - keep the perf job to `main`.
 
 ### What it costs
 
@@ -195,13 +237,28 @@ bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh smoke
   - builds the three images at exactly the CI-tested commit;
   - runs `scripts/check-images.sh` on them;
   - pushes them to GHCR and passes their `@sha256` references on.
-- **The deploy job** runs under the `production` environment (deployments from `main` only):
-  - It signs in to Azure as `chitthi-deploy` by OIDC. No credential is stored anywhere, and that identity can only use Run Command on the VM.
+- **The two jobs' token permissions:**
+
+  ```yaml
+  build:              # pushes the images; its token never leaves GitHub's runner
+    permissions:
+      contents: read
+      packages: write
+  deploy:             # its GITHUB_TOKEN is the one handed to the VM
+    permissions:
+      contents: read  # the VM fetches this commit's config
+      packages: read  # and pulls the private images
+      id-token: write # lets the job ask GitHub for an OIDC token for Azure; adds no scope to GITHUB_TOKEN
+  ```
+
+  The workflow's default is `permissions: {}`. `deploy/azure/test_azure_tools.py` asserts all three blocks, and that only deploy-job steps pass a token to `run-on-vm.sh`.
+- **The deploy job** runs only for `main`:
+  - It signs in to Azure as `chitthi-deploy` by OIDC. No credential is stored anywhere. Azure trusts only tokens for `repo:DhruvGoyal404/chitthi:ref:refs/heads/main`, and the identity can only use managed Run Command on the VM.
   - It runs `edge.sh` (a no-op unless `deploy/edge` changed), then `deploy.sh`.
   - It then runs [`deploy/azure/public-check.sh`](../deploy/azure/public-check.sh) from the internet. It checks health, at least 14 days left on the certificate, the headers, the redirect, the Origin refusals, and that ports 22, 5432, 5435, 8082 and 5175 are closed.
   - The check runs after a failed deploy too, so the log shows what the rolled-back site serves.
 - **The repo and images are private.**
-  - The deploy job hands the VM its own `GITHUB_TOKEN` (contents:read, packages:read) through `run-on-vm.sh`, as an environment variable, never an argument.
+  - The deploy job hands the VM its own `GITHUB_TOKEN` (contents:read, packages:read) through `run-on-vm.sh`, as a managed Run Command **protected parameter**. It reaches the script as an environment variable and is never an argument or part of the script text.
   - `deploy.sh` and `edge.sh` use it for the GitHub contents API and a throwaway Docker login under their scratch folder.
   - GitHub revokes the token when the job ends, so the copy Run Command keeps on the VM (root-only) is dead within minutes.
   - CI exercises this path on every push: test-deploy's first deploy fetches through the API and signs in to ghcr.io with CI's own token.

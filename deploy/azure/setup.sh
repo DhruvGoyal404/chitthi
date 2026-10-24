@@ -18,7 +18,7 @@
 #   - the backup storage account and container: the VM's identity may only create and read blobs
 #     there; lifecycle rules expire dumps, manifests and selftest probes; 14 days of soft delete;
 #   - Key Vault: the VM's identity reads secrets, the owner manages them;
-#   - the deploy identity, which GitHub Actions signs in as (OIDC, environment "production"); it
+#   - the deploy identity, which GitHub Actions signs in as (OIDC, this repo's main branch); it
 #     may only use Run Command on this VM.
 set -euo pipefail
 umask 077
@@ -41,7 +41,7 @@ APP_RG=chitthi
 CONTAINER=backups
 DEPLOY_ID=chitthi-deploy
 GITHUB_REPO=DhruvGoyal404/chitthi
-GITHUB_ENV=production
+GITHUB_REF_TRUSTED=refs/heads/main # any GitHub plan (private-repo environments need Pro)
 BACKUP_ROLE="Blob create-only writer"
 RUNCMD_ROLE="VM Run Command operator"
 KEEP_DAYS=35
@@ -253,8 +253,10 @@ identities() { # <owner's object id>
   local vm_pid deploy_pid
   role_definition "$BACKUP_ROLE" "Create and read blobs; never overwrite or delete them. Append-only backups." '[]' \
     '["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read","Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action"]'
-  role_definition "$RUNCMD_ROLE" "Run commands on a VM through Run Command; nothing else." \
-    '["Microsoft.Compute/virtualMachines/read","Microsoft.Compute/virtualMachines/runCommand/action"]' '[]'
+  # Managed Run Command only (create, read its result, delete it): the API with protected
+  # parameters. Not runCommand/action, the older API, which has none.
+  role_definition "$RUNCMD_ROLE" "Run scripts on a VM through managed Run Command; nothing else." \
+    '["Microsoft.Compute/virtualMachines/read","Microsoft.Compute/virtualMachines/runCommands/read","Microsoft.Compute/virtualMachines/runCommands/write","Microsoft.Compute/virtualMachines/runCommands/delete"]' '[]'
 
   vm_pid=$(v vm show -g "$HOST_RG" -n "$VM" --query identity.principalId)
   [[ -n $vm_pid ]] || die "the VM has no system identity"
@@ -265,8 +267,8 @@ identities() { # <owner's object id>
   assign "$1" User "Storage Blob Data Contributor" "$CONTAINER_ID"
 
   exists identity show -g "$APP_RG" -n "$DEPLOY_ID" || q identity create -g "$APP_RG" -n "$DEPLOY_ID" -l "$LOCATION"
-  q identity federated-credential create -g "$APP_RG" --identity-name "$DEPLOY_ID" -n github-$GITHUB_ENV \
-    --issuer https://token.actions.githubusercontent.com --subject "repo:$GITHUB_REPO:environment:$GITHUB_ENV" \
+  q identity federated-credential create -g "$APP_RG" --identity-name "$DEPLOY_ID" -n github-main \
+    --issuer https://token.actions.githubusercontent.com --subject "repo:$GITHUB_REPO:ref:$GITHUB_REF_TRUSTED" \
     --audiences api://AzureADTokenExchange
   deploy_pid=$(v identity show -g "$APP_RG" -n "$DEPLOY_ID" --query principalId)
   assign "$deploy_pid" ServicePrincipal "$RUNCMD_ROLE" "$VM_ID"
@@ -426,7 +428,7 @@ check() { # [infra]: secrets not yet stored are reported, not counted, when call
     '{"actions":[],"data":["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action","Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read"]}'
   got=$(j role definition list --custom-role-only true --name "$RUNCMD_ROLE" --query "[0].permissions[0].{actions: sort(actions), data: dataActions}")
   expect "role '$RUNCMD_ROLE' grants Run Command only" "$got" \
-    '{"actions":["Microsoft.Compute/virtualMachines/read","Microsoft.Compute/virtualMachines/runCommand/action"],"data":[]}'
+    '{"actions":["Microsoft.Compute/virtualMachines/read","Microsoft.Compute/virtualMachines/runCommands/delete","Microsoft.Compute/virtualMachines/runCommands/read","Microsoft.Compute/virtualMachines/runCommands/write"],"data":[]}'
   vm_pid=$(v vm show -g "$HOST_RG" -n "$VM" --query identity.principalId)
   got=$(v role assignment list --all --query "sort([?principalId=='$vm_pid'].join('@', [roleDefinitionName, scope]))" --output json | jq -r 'join(" ")' | lower)
   expect "the VM's identity holds exactly: create-only on $CONTAINER, Secrets User on $KV" "$got" \
@@ -435,8 +437,8 @@ check() { # [infra]: secrets not yet stored are reported, not counted, when call
   got=$(v role assignment list --all --query "[?principalId=='$deploy_pid'].join('@', [roleDefinitionName, scope])" --output json | jq -r 'join(" ")' | lower)
   expect "the deploy identity holds exactly: Run Command on $VM" "$got" "$(echo "$RUNCMD_ROLE@$VM_ID" | lower)"
   got=$(j identity federated-credential list -g "$APP_RG" --identity-name "$DEPLOY_ID" --query "[].{issuer: issuer, subject: subject, audiences: audiences}")
-  expect "the deploy identity trusts only $GITHUB_REPO's '$GITHUB_ENV' environment" "$got" \
-    "[{\"audiences\":[\"api://AzureADTokenExchange\"],\"issuer\":\"https://token.actions.githubusercontent.com\",\"subject\":\"repo:$GITHUB_REPO:environment:$GITHUB_ENV\"}]"
+  expect "the deploy identity trusts only $GITHUB_REPO's main branch" "$got" \
+    "[{\"audiences\":[\"api://AzureADTokenExchange\"],\"issuer\":\"https://token.actions.githubusercontent.com\",\"subject\":\"repo:$GITHUB_REPO:ref:$GITHUB_REF_TRUSTED\"}]"
 
   # Key Vault and its secrets (names only)
   got=$(j keyvault show -g "$APP_RG" -n "$KV" --query "{rbac: properties.enableRbacAuthorization, purgeProtection: properties.enablePurgeProtection, softDelete: properties.enableSoftDelete}")
@@ -484,7 +486,7 @@ Next (docs/MAINTENANCE.md, "Azure setup"):
   2. Secrets: bash deploy/azure/setup.sh secrets
   3. The host: bash deploy/azure/run-on-vm.sh deploy/host/bootstrap.sh
   4. The edge: bash deploy/azure/run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=$1
-  5. GitHub, environment "$GITHUB_ENV" (deployments from main only), variables:
+  5. GitHub repository variables (Settings > Secrets and variables > Actions > Variables), then DEPLOY_ENABLED=true:
        AZURE_CLIENT_ID=$client_id
        AZURE_TENANT_ID=$TENANT
        AZURE_SUBSCRIPTION_ID=$SUB
