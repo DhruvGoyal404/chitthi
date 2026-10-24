@@ -607,7 +607,7 @@ check() { # [infra|summary]: secrets not yet stored are reported as todo, not co
   done
   got=$(az rest --method get --only-show-errors --output json \
     --url "https://management.azure.com$SUB_SCOPE/providers/Microsoft.Consumption/budgets/$BUDGET_NAME?api-version=2023-05-01" 2>/dev/null \
-    | jq -c '[.properties.notifications[] | select(.enabled) | "\(.thresholdType):\(.threshold)"] | sort' || echo missing)
+    | jq -c '[.properties.notifications[] | select(.enabled) | "\(.thresholdType):\(.threshold | floor)"] | sort' || echo missing) # thresholds come back as floats (100.0)
   expect "budget $BUDGET_NAME alerts at 50/80/100 % and on a 100 % forecast" "$got" '["Actual:100","Actual:50","Actual:80","Forecasted:100"]'
 
   echo
