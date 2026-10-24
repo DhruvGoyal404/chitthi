@@ -20,6 +20,7 @@ alerts, secret rotation, updates, disk growth, adding the second app, budget, in
   - **api:** on 127.0.0.1:8082.
   - **web:** on 127.0.0.1:5175.
   - Data lives under `/data/chitthi` on the data disk.
+- **`deploy/azure`:** what you run from Azure Cloud Shell: `setup.sh` (the Azure resources), `run-on-vm.sh` (the host scripts, through Run Command) and `compact_media.py` (the monthly media compaction).
 - **Secrets:** each container reads only its own env file (`db.env`, `migrate.env`, `api.env`).
   - The API never sees the database owner's password.
   - The compose `.env` holds only image digests and paths, so `docker compose config` is safe to print.
@@ -30,6 +31,114 @@ alerts, secret rotation, updates, disk growth, adding the second app, budget, in
 
   CI runs it on every push (the `images` job).
 
+## Azure setup
+
+[`deploy/azure/setup.sh`](../deploy/azure/setup.sh) creates everything in Azure. You run it in
+Azure Cloud Shell (Bash), signed in as yourself, with Owner on the subscription. It's
+re-runnable: each run creates what's missing, brings settings back to what the script says, and
+ends with the same read-only verification as `setup.sh check`. It never deletes anything and never
+replaces a stored secret.
+
+**What it builds:**
+
+| Resource group | What | Settings |
+|---|---|---|
+| `apps-host` (shared by both apps) | VM `apps-vm` | B2ats v2, Ubuntu 24.04 (the newest image at least 14 days old), Trusted Launch, system identity. Azure requires an admin login, so it gets a key whose private half is deleted on the spot: there is no SSH, by design. Boot diagnostics are on, for the Serial Console. |
+| | Network | `apps-vm-nsg` allows TCP 80 and 443 from the Internet, nothing else. `apps-vm-ip` is a static Standard IPv4. No IPv6. |
+| | Disks | OS and data disk `apps-vm-data` are 64 GiB Premium SSD (P6). The data disk sits at LUN 0, with a delete lock. |
+| | Alerts | Action group `ops-email` sends to your address. Metric alerts: the VM unavailable, under 100 MiB available memory for 15 minutes, CPU credits under 30. Activity log alerts: the VM's resource health, and any role assignment written in the subscription. |
+| | Budget | `apps-host`, monthly, for the whole subscription. Default ₹700 (pass `budget=` if the billing currency isn't INR). Email at 50, 80 and 100 % actual, and at 100 % forecast. |
+| `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS. Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
+| | Key Vault `chitthi-kv-<6 hex>` | Standard, RBAC, purge protection, 90-day soft delete, delete lock. |
+| | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404/chitthi:environment:production`. |
+
+The `<6 hex>` suffix comes from the subscription id, so every run finds the same names.
+
+**Who may do what:**
+
+| Identity | Role | Scope |
+|---|---|---|
+| The VM | `Blob create-only writer` (custom: `blobs/read` and `blobs/add/action`, no `write` or `delete`) | the `backups` container |
+| The VM | Key Vault Secrets User | the vault |
+| `chitthi-deploy` | `VM Run Command operator` (custom: `virtualMachines/read` and `runCommand/action`) | the VM |
+| You | Key Vault Secrets Officer | the vault |
+| You | Storage Blob Data Contributor, for the monthly compaction | the `backups` container |
+
+`setup.sh check` fails if any of these identities holds anything more.
+
+### Going live, in order
+
+1. **Infrastructure:**
+   ```
+   git clone https://github.com/DhruvGoyal404/chitthi && cd chitthi
+   bash deploy/azure/setup.sh infra alert_email=<you@…>
+   ```
+   Confirm the alert group's email (Azure sends one) and check it didn't land in spam.
+2. **DNS:** an A record `chitthi.dhruvgoyal.tech` pointing to the IP it prints. No AAAA record.
+3. **OAuth apps,** each with its callback on the public origin:
+   - **Google:** `https://chitthi.dhruvgoyal.tech/api/auth/google/callback`.
+   - **GitHub:** an OAuth app with homepage `https://chitthi.dhruvgoyal.tech` and callback `https://chitthi.dhruvgoyal.tech/api/auth/github/callback`.
+4. **Cloudflare R2:**
+   - **Bucket:** `chitthi-backups`, location hint Asia-Pacific.
+   - **Bucket lock rule:** the whole bucket (no prefix), 30 days.
+   - **Lifecycle rules:** delete objects under `db/`, `manifests/` and `selftest/` 35 days after upload.
+   - **API token:** "Object Read & Write", applied to this bucket only. Keep its access key id, secret and S3 endpoint for step 6.
+5. **healthchecks.io,** both checks emailing you:
+   - **`chitthi-backup`:** period 1 day, grace 2 hours (the 26-hour freshness window).
+   - **`chitthi-drill`:** cron `0 23 1 * *` UTC, grace 6 hours.
+6. **Secrets:** `bash deploy/azure/setup.sh secrets`.
+   - **Generated, if missing:** both database passwords and the backup keypair. The keypair is made in Python ([`age_keypair.py`](../deploy/azure/age_keypair.py)), because Cloud Shell has no age; CI checks it against the real age.
+   - **Asked for, with input hidden and the format checked:** the OAuth, R2 and healthchecks values.
+   - **Then keep a copy of the backup private key outside Azure,** in a password manager (the script prints the command that shows it). Without it, no backup can be read.
+7. **The host:** `bash deploy/azure/run-on-vm.sh deploy/host/bootstrap.sh`.
+8. **The edge,** once DNS resolves: `bash deploy/azure/run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=<you@…>`. To test certificate issuance first without using up Let's Encrypt's limits, add `acme_ca=staging`. Re-run without it before the first deploy: the deploy's smoke test needs a trusted certificate.
+9. **GitHub:**
+   - Create the environment `production`, with deployments allowed from `main` only.
+   - Set the variables `setup.sh infra` printed: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `VM_RG`, `VM_NAME`, `KEY_VAULT`, `BACKUP_ACCOUNT`, `BACKUP_CONTAINER`, `R2_BUCKET`.
+   - None of these are secrets. With OIDC there is no stored credential.
+10. **The first deploy,** from the deploy workflow.
+11. **Prove the backups are append-only** with the VM's real credentials: `bash deploy/azure/run-on-vm.sh deploy/host/backup.sh selftest`. It must pass every line.
+12. **Go-live gate:**
+    - an alert email arrives;
+    - the first nightly backup succeeds (healthchecks shows it green);
+    - a restore drill passes (`bash deploy/azure/run-on-vm.sh deploy/host/backup.sh drill`);
+    - a deliberately broken deploy rolls itself back.
+
+**Things only the real run can prove,** because CI has no Azure account:
+- the deploy identity's Run Command role is enough for `az vm run-command invoke`;
+- budgets work on this subscription type (the script fails loudly if they don't);
+- B2ats v2 is offered in Central India to this subscription.
+
+`setup.sh check` and the selftest are the evidence.
+
+### Running scripts on the VM
+
+[`deploy/azure/run-on-vm.sh`](../deploy/azure/run-on-vm.sh) `<script> [arguments…]` runs one of
+this repo's host scripts as root through Run Command. It prints the output and exits with the
+script's exit code. Plain `az vm run-command invoke` reports success whatever the script returned,
+and on Linux it may pass `name=value` parameters as environment variables rather than arguments,
+so the wrapper carries the arguments itself. Arguments are limited to `[A-Za-z0-9@._:/=+-]`.
+Run Command keeps only the last 4096 bytes of output.
+
+### What it costs
+
+Monthly list prices, approximate; Cost Management has the real figures a day after anything changes:
+
+| Item | Cost |
+|---|---|
+| VM (B2ats v2) and two P6 disks | Inside Azure's 12-month free-services allowance (750 VM hours, two P6 disks) if the subscription has it. Otherwise roughly ₹600 for the VM and ₹800 per P6. After 12 months, move the disks to Standard SSD. |
+| Static public IPv4 | About ₹300 (USD 0.005 an hour). |
+| Key Vault | Standard tier: USD 0.03 per 10,000 secret operations, and secrets cost nothing to store. A deploy reads 6 secrets and a nightly backup 5, so roughly 300 operations a month: effectively zero. |
+| Backup storage | A few GB of LRS blobs plus transactions: a few rupees. |
+| Alerts | Three metric alerts at about USD 0.10 each. Activity log alerts and the budget are free. |
+| Outbound traffic | The first 100 GB a month are free. |
+
+**Azure for Students** stops the subscription when the credit runs out, and the site goes down
+with it. The budget alerts are the early warning.
+
+**Tearing down** needs the delete locks removed first (`az lock delete`). After deletion, Key Vault's
+purge protection holds the vault's name for 90 days.
+
 ## Host setup
 
 [`deploy/host/bootstrap.sh`](../deploy/host/bootstrap.sh) turns a fresh Ubuntu 24.04 VM into the host.
@@ -37,7 +146,7 @@ alerts, secret rotation, updates, disk growth, adding the second app, budget, in
 **Running it.** Use Run Command; there is no SSH:
 
 ```
-az vm run-command invoke -g <rg> -n <vm> --command-id RunShellScript --scripts @deploy/host/bootstrap.sh
+bash deploy/azure/run-on-vm.sh deploy/host/bootstrap.sh
 ```
 
 **Idempotent.** Re-run it after any change to the file. Every run ends by re-verifying the whole
@@ -67,15 +176,15 @@ host set up this way.
 ## Deploy and rollback
 
 [`deploy/host/deploy.sh`](../deploy/host/deploy.sh) runs as root through Run Command. The deploy
-workflow sends it with the release's arguments; by hand:
+workflow sends it with the release's arguments; by hand, from Cloud Shell:
 
 ```
-az vm run-command invoke -g <rg> -n <vm> --command-id RunShellScript --scripts @deploy/host/deploy.sh \
-  --parameters deploy sha=<commit> api=ghcr.io/dhruvgoyal404/chitthi-api@sha256:<…> \
-               migrate=ghcr.io/dhruvgoyal404/chitthi-migrate@sha256:<…> web=ghcr.io/dhruvgoyal404/chitthi-web@sha256:<…> \
-               vault=<key vault>
-az vm run-command invoke … --scripts @deploy/host/deploy.sh --parameters rollback
-az vm run-command invoke … --scripts @deploy/host/deploy.sh --parameters smoke
+bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh deploy sha=<commit> \
+  api=ghcr.io/dhruvgoyal404/chitthi-api@sha256:<…> migrate=ghcr.io/dhruvgoyal404/chitthi-migrate@sha256:<…> \
+  web=ghcr.io/dhruvgoyal404/chitthi-web@sha256:<…> \
+  vault=<KEY_VAULT> storage=<BACKUP_ACCOUNT> container=backups r2_bucket=<R2_BUCKET>
+bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh rollback
+bash deploy/azure/run-on-vm.sh deploy/host/deploy.sh smoke
 ```
 
 **A deploy, in order:**
@@ -129,7 +238,7 @@ using or drop the old one in a later release (expand, then contract).
 **The edge itself** is installed or updated with `edge.sh`, never by an app's deploy:
 
 ```
-az vm run-command invoke … --scripts @deploy/host/edge.sh --parameters sha=<commit> acme_email=<address> [acme_ca=staging]
+bash deploy/azure/run-on-vm.sh deploy/host/edge.sh sha=<commit> acme_email=<address> [acme_ca=staging]
 ```
 
 A new main `Caddyfile` is validated with every site file already present. If Caddy then refuses
@@ -161,7 +270,7 @@ byte-identical to before, and the other site must still answer.
 |---|---|---|
 | `chitthi-backup.timer` → `backup.sh run` | nightly, 20:30 UTC (02:00 IST), before the reboot window | Database dump, new media, manifest; to Azure Blob, then to R2 |
 | `chitthi-restore-drill.timer` → `backup.sh drill` | the 1st of each month, 23:00 UTC | Restores the newest backup into a scratch database and verifies it |
-| `backup.sh selftest` | once at setup, through Run Command | Proves the VM's real credentials can create but not overwrite or delete |
+| `backup.sh selftest` | once at setup: `run-on-vm.sh deploy/host/backup.sh selftest` | Proves the VM's real credentials can create but not overwrite or delete |
 
 Both timer services are capped at 256 MB and run at idle CPU and I/O priority.
 
@@ -171,6 +280,8 @@ Both timer services are capped at 256 MB and run at idle CPU and I/O priority.
   (Put Block needs `write`, which the role doesn't have.)
 - **R2:** objects are copied with `rclone copy --immutable`, or streamed for media the bucket
   doesn't have yet. The bucket lock refuses overwrites and deletes for 30 days.
+  - **The limit of that:** R2 has no create-only token, and the VM's token is "Object Read & Write". Once an object's 30-day lock ends, a compromised VM could delete or overwrite it on R2.
+  - Dumps and manifests expire at 35 days anyway. Media older than 30 days is safe in Azure, where the VM can't delete. The drill reads media from Azure.
 - **Not restic.** restic must delete its own lock files, and `--no-lock` isn't supported for
   `backup` (restic issue #1544).
 
@@ -213,8 +324,21 @@ It then drops the scratch database.
   creation, on Azure and on R2 (R2's lock ends at 30). Azure's soft delete keeps deleted blobs 14
   more days.
 - **Media isn't deleted by age,** because files still in use are old too. Once a month, the owner
-  runs the compaction script in Cloud Shell, under their own identity. It deletes media that no
-  manifest from the last 35 days lists. The VM still never deletes.
+  runs [`compact_media.py`](../deploy/azure/compact_media.py) in Cloud Shell, under their own identity.
+  The VM still never deletes.
+
+  ```
+  python3 deploy/azure/compact_media.py --vault <KEY_VAULT> --account <BACKUP_ACCOUNT> --r2-bucket <R2_BUCKET>          # report
+  python3 deploy/azure/compact_media.py --vault <KEY_VAULT> --account <BACKUP_ACCOUNT> --r2-bucket <R2_BUCKET> --apply  # delete
+  ```
+
+  It deletes a media object, on Azure and on R2, only if all of these hold:
+  - no manifest from the last 35 days lists it;
+  - it was created more than 35 days ago, so R2's lock has ended and no manifest can still be on its way;
+  - the newest manifest is under 48 hours old;
+  - the run would delete no more than half of all media, unless you pass `--force` after looking.
+
+  It reaches R2 with the VM's token, read from Key Vault into memory. Cloud Shell has no rclone, so it signs requests itself (SigV4, tested against AWS's vector).
 
 **What that means for privacy.** A message deleted for everyone, or an erased account's messages,
 lives on in dumps for up to about 7 weeks (35 days plus 14 of soft delete). Files can last up to
