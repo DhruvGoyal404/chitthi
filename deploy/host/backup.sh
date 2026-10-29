@@ -169,7 +169,7 @@ r2_env() {
   printf 'user = "%s:%s"\naws-sigv4 = "aws:amz:auto:s3"\n' "$key" "$secret_key" > "$work/r2.curl"
 }
 r2_curl() { curl -sS --max-time 600 -K "$work/r2.curl" "$@"; }
-r2_put() { # <file> <key> [overwrite]: prints the HTTP status (200 created; 412 exists; 403 locked)
+r2_put() { # <file> <key> [overwrite]: prints the HTTP status (200 created; 412 or 409 exists; 409 locked)
   if [[ -n $TEST ]]; then
     local dst=$R2_DIR/$2
     if [[ -e $dst ]]; then echo 412; return; fi
@@ -284,7 +284,7 @@ run_backup() {
     [[ -n $k ]] || continue
     age -r "$recipient" < "$(media_path "$k")" > "$work/m.age"
     code=$(r2_put "$work/m.age" "media/$k.age")
-    [[ $code == 200 || $code == 412 ]] || die "R2 upload of media/$k.age got HTTP $code" # 412: listed late, already there
+    [[ $code == 200 || $code == 409 || $code == 412 ]] || die "R2 upload of media/$k.age got HTTP $code" # already there: 412, or 409 under the lock
     missing=$((missing + 1))
   done < <(comm -23 <(echo "$keys") <(echo "$existing"))
   rm -f "$work/m.age"
@@ -398,7 +398,8 @@ run_selftest() {
   intact Azure az_get
   r2_env
   code=$(r2_put "$work/probe" "$probe");             expect "R2: create a new object, one PutObject, first attempt" "$code" 200
-  code=$(r2_put "$work/probe" "$probe");             expect "R2: create again is refused (If-None-Match)" "$code" 412
+  # 412 from If-None-Match, or 409: R2 answers 409 for a key under the bucket lock (seen on the VM).
+  code=$(r2_put "$work/probe" "$probe");             expect "R2: create again is refused" "$code" '409|412'
   # Without the condition, only the bucket lock stands in the way: any refusal, then the read-back.
   code=$(r2_put "$work/changed" "$probe" overwrite); expect "R2: overwrite is refused (bucket lock)" "$code" '[34][0-9][0-9]|501'
   code=$(r2_delete "$probe");                        expect "R2: delete is refused (bucket lock)" "$code" '[34][0-9][0-9]|501'

@@ -509,6 +509,7 @@ Both timer services are capped at 256 MB and run at idle CPU and I/O priority.
   - **A second create of an existing blob comes back 403, not 409** (seen on the VM, 2026-10-25). Azure checks authorization first: replacing a blob needs `write`, which the role lacks, so the request is refused before the `If-None-Match` condition is evaluated. The selftest accepts 403 or 409. The nightly media upload treats a 403 as "already there" only after a HEAD confirms the blob exists.
 - **R2:** one `PutObject` per object over R2's S3 API, sent by curl, with `If-None-Match: *` so an
   existing key is never overwritten. The bucket lock refuses overwrites and deletes for 30 days.
+  - **A second create of an existing key comes back 409, not 412** (seen on the VM, 2026-10-29). Under the bucket lock R2 refuses any write to a locked key with 409 before it evaluates `If-None-Match`, the same order as Azure's 403. The selftest accepts 409 or 412 and proves the refusal by reading the probe back. The nightly media upload treats 409 and 412 as "already there".
   - **Exactly what is sent** (`backup.sh`, `r2_*`): `curl -sS --max-time 600 -K <0600 config> -X PUT -T <file> -H "x-amz-content-sha256: <the file's sha256>" -H "If-None-Match: *" <endpoint>/<bucket>/<key>`. The config file holds `user = "<access key id>:<secret>"` and `aws-sigv4 = "aws:amz:auto:s3"`, so the keys never appear on a command line.
   - **Nothing is streamed and nothing is multipart.** Media is encrypted to a file first, so every object goes up in one request of known length. Listing is `GET ?list-type=2&prefix=…` (ListObjectsV2, following continuation tokens), and the drill and restore read with a plain signed `GET`.
   - **The signing is checked against our own SigV4 signer:** the one in `compact_media.py`, tested against AWS's published vector. On 2026-10-29 curl's PUT (with `If-None-Match` and the payload hash), its list (with an encoded continuation token) and its DELETE all verified.
@@ -782,6 +783,8 @@ At worst you lose everything since last night's backup (02:00 IST).
   - R2 now gets one curl `PutObject` per object. The selftest reads its probe back after each refused attempt, so a refusal is proven by the content, not the status code.
   - healthchecks.io turned `chitthi-backup` red that night, as designed.
 - **Recovery:** the next run fills the missing R2 media by itself (it uploads what R2's listing lacks). Nothing on R2 needs deleting, and the 30-day lock wouldn't allow it.
+
+**2026-10-29: the selftest after the curl change.** Every check passed but one: R2 refused the second create with 409, where the selftest expected 412. A false FAIL, like Azure's 403: the probe read back intact, and overwrite and delete were refused (409). The selftest now accepts 409 or 412. `run` and `drill` passed the same day, with R2 caught up.
 
 ## Pending dependency upgrades
 
