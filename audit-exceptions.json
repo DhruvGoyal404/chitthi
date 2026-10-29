@@ -4,11 +4,5 @@
     "package": "body-parser",
     "expires": "2026-11-07",
     "reason": "The fix (body-parser 2.4.0, 2026-10-22) is installable from 2026-11-06 (published 2026-10-22 11:39 UTC; --before works in whole days); one day of grace to land it. Mitigated meanwhile: express.json refuses compressed bodies (inflate: false), tested in api/test/process.test.ts."
-  },
-  {
-    "id": "GHSA-mrhx-c7xc-m3w5",
-    "package": "zod",
-    "expires": "2026-10-27",
-    "reason": "The fix (zod 4.6.6, 2026-10-11) is installable from 2026-10-26 (published 2026-10-11 16:18 UTC; --before works in whole days); one day of grace to land it. Exploitable before the mitigation (authenticated): .max() did not stop per-element validation. Mitigated: arrays are length-checked first (boundedArray in api/src/routes.ts) and error responses carry at most 10 issues; tested in api/test/routes.db.test.ts."
   }
 ]
