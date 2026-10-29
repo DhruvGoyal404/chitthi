@@ -1,11 +1,12 @@
 import { randomInt } from 'node:crypto';
 import type pg from 'pg';
 import { HttpError } from '../errors.js';
-import { mapUserError, type Me } from '../repo/users.js';
+import { avatarUrlSql, mapUserError, type Me } from '../repo/users.js';
 import { isUniqueViolation, withTx } from '../repo/pg.js';
 import { sha256, type Provider } from './flows.js';
 
-export type PendingSignup = { provider: Provider; email: string; displayName: string; avatarUrl: string | null; suggestedHandle: string };
+/** No picture: the provider's address would make the browser contact Google or GitHub. Ours is made at signup. */
+export type PendingSignup = { provider: Provider; email: string; displayName: string; suggestedHandle: string };
 
 const expired = () => new HttpError(404, 'signup_expired', 'This sign-in has expired. Please start again.');
 
@@ -30,8 +31,8 @@ async function suggestHandle(pool: pg.Pool, email: string, name: string): Promis
 /** What the welcome page prefills, from the provider's verified profile. */
 export async function pendingSignup(pool: pg.Pool, token: string | undefined): Promise<PendingSignup> {
   if (!token) throw expired();
-  const { rows: [row] } = await pool.query<{ provider: Provider; email: string; display_name: string; avatar_url: string | null }>(
-    'SELECT provider, email, display_name, avatar_url FROM pending_signups WHERE token_hash = $1 AND expires_at > now()',
+  const { rows: [row] } = await pool.query<{ provider: Provider; email: string; display_name: string }>(
+    'SELECT provider, email, display_name FROM pending_signups WHERE token_hash = $1 AND expires_at > now()',
     [sha256(token)],
   );
   if (!row) throw expired();
@@ -39,7 +40,6 @@ export async function pendingSignup(pool: pg.Pool, token: string | undefined): P
     provider: row.provider,
     email: row.email,
     displayName: row.display_name,
-    avatarUrl: row.avatar_url,
     suggestedHandle: await suggestHandle(pool, row.email, row.display_name),
   };
 }
@@ -67,7 +67,7 @@ export async function completeSignup(pool: pg.Pool, token: string | undefined, i
       if (rowCount) throw new HttpError(409, 'account_exists', 'An account already uses this email. Sign in the way you did before.');
       const { rows: [user] } = await tx.query<Me>(
         `INSERT INTO users AS u (handle, display_name, avatar_url) VALUES ($1, $2, $3)
-         RETURNING u.id, u.handle, u.display_name AS "displayName", u.avatar_url AS "avatarUrl"`,
+         RETURNING u.id, u.handle, u.display_name AS "displayName", ${avatarUrlSql('u')} AS "avatarUrl"`,
         [input.handle, input.displayName, p.avatar_url],
       );
       if (!user) throw new Error('insert returned no row');

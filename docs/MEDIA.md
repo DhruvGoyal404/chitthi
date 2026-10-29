@@ -98,6 +98,33 @@ Rows in `attachments` are never deleted. `deleted_at` says the content is gone, 
 
 **The sweeper** runs inside the API process every 10 minutes and never overlaps itself. One pass marks orphans, removes pending files in batches of 500, then reconciles the store. Test servers run with it switched off, and tests drive it directly.
 
+## Avatars
+
+A person's picture is our own copy of their sign-in provider's picture
+([`api/src/media/avatars.ts`](../api/src/media/avatars.ts)), so no viewer's browser ever
+contacts Google or GitHub. The web CSP's `img-src` is `'self' data: blob:`, so no page can load a
+third-party image at all.
+
+- **When:** at every sign-in to an existing account, and when an account is created. A failure never blocks sign-in: the person keeps their previous copy, or initials.
+- **Fetching:**
+  - https only, from `lh3`–`lh6.googleusercontent.com` and `avatars.githubusercontent.com`, with no credentials or port in the URL;
+  - asked for at 256 px;
+  - no redirects followed, a 5 s timeout, and 2 MB at most, counted while reading.
+- **Re-encoding** (`images.avatar`): the same rules as photo uploads.
+  - The format comes from the bytes (JPEG, PNG, WebP, GIF), and only the first frame of an animation is used.
+  - Orientation is applied and all metadata dropped. It is centre-cropped to 128 × 128 and saved as WebP.
+  - It runs in the uploads' decode queue, under the same pixel limit.
+- **Storage:** in the media store under a random key, as `users.avatar_key`. `users.avatar_url` keeps the provider address the copy came from. A new copy replaces the old one, whose file is deleted.
+- **Serving:** `GET /api/users/:id/avatar`, to the person and to anyone who shares or shared a conversation with them.
+  - Everyone else, and anyone without a picture, gets the same 404.
+  - It is served like an attachment: attachment disposition, nosniff, a sandbox CSP, private caching, and the key as the ETag.
+  - The API's `avatarUrl` is `/api/users/<id>/avatar?v=<key prefix>`, so a new picture is a new URL. Lists that can include strangers (search, blocks) carry it only where the viewer would be allowed to see it.
+- **Lifecycle:**
+  - Deleting an account clears the key and deletes the file.
+  - The sweeper treats every `avatar_key` as referenced, and removes a file left behind by a concurrent refresh.
+  - `dev:reset-media` clears the keys along with the files.
+  - Backups include avatars like any other media file.
+
 ## In the web app
 
 **Attaching.**

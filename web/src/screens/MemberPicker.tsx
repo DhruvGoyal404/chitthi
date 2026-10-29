@@ -19,7 +19,7 @@ export function MemberPicker({ onPick, exclude, label = 'Add people by handle' }
           <li key={u.id}>
             <button type="button" onClick={() => { onPick(u); setQ(''); }}
               className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-paper-deep">
-              <Avatar name={u.displayName} size={32} />
+              <Avatar name={u.displayName} src={u.avatarUrl} size={32} />
               <span className="min-w-0 flex-1 truncate text-ink">{u.displayName} <span className="text-ink-soft">@{u.handle}</span></span>
               <Icon.Plus className="text-ink-soft" />
               <span className="sr-only">Add {u.displayName}</span>

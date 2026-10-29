@@ -17,7 +17,7 @@ function MemberRow({ m, meId, canRemove, onRemove }: { m: Member; meId: string |
   return (
     <li className="flex items-center gap-3 py-2">
       <span className="relative">
-        <Avatar name={m.displayName} size={36} />
+        <Avatar name={m.displayName} src={m.avatarUrl} size={36} />
         {presence && <PresenceDot online={presence.online} className="absolute -bottom-0.5 -right-0.5" />}
       </span>
       <span className="min-w-0 flex-1">

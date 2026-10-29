@@ -5,7 +5,7 @@ import { Link } from 'react-router';
 // Google's consent screen. Plain words, and only what the code really does: each statement
 // below has a source in api/, db/migrations/ or docs/MAINTENANCE.md. Change them together.
 export const CONTACT_EMAIL = 'privacy@dhruvgoyal.tech';
-const UPDATED = '24 October 2026';
+const UPDATED = '29 October 2026';
 
 function Page({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -43,7 +43,11 @@ export function Privacy() {
 
       <h2>What we keep</h2>
       <ul>
-        <li><strong>Your account:</strong> your handle, display name, profile picture link and when you joined.</li>
+        <li>
+          <strong>Your account:</strong> your handle, display name and when you joined, and a copy of your profile picture:
+          our server fetches it from Google or GitHub when you sign in, re-encodes it as a small square (removing any
+          hidden data) and stores it with the files. Other people's browsers only ever load our copy.
+        </li>
         <li>
           <strong>From Google or GitHub, when you sign in:</strong> your account id there, your verified email address, your
           name and picture link. We ask Google for <em>openid, email, profile</em> and GitHub for <em>read:user,
@@ -86,8 +90,8 @@ export function Privacy() {
       <h2>Who can see what</h2>
       <p>
         The people in a conversation see its messages and files from when they joined until they left. Others see your
-        handle, display name and picture when they search for you or share a conversation with you. Files can only be
-        downloaded by members of the conversation they were sent in.
+        handle and display name when they search for you; only people who share a conversation with you see your
+        picture. Files can only be downloaded by members of the conversation they were sent in.
       </p>
 
       <h2>Deleting things</h2>

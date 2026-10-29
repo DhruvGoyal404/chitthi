@@ -41,8 +41,8 @@ const initials = (name: string) =>
   name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? '').join('') || '?';
 
 /**
- * A postage-stamp avatar: initials on a perforated stamp, or the provider's picture (https only,
- * checked by the database) when there is one. Sent without a Referer; falls back on error.
+ * A postage-stamp avatar: the person's picture, from our own server (never the provider's), or
+ * initials on a perforated stamp when there is none or it fails to load.
  */
 export function Avatar({ name, size = 40, group = false, src }: { name: string; size?: number; group?: boolean; src?: string | null | undefined }) {
   const [broken, setBroken] = useState(false);

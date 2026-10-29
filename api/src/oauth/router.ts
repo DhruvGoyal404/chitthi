@@ -10,6 +10,8 @@ import { SESSION_COOKIE, sessionToken, startSession, type SessionStore } from '.
 import { identitiesOf, linkIdentity, signInWith } from './accounts.js';
 import { consumeFlow, isProvider, OAuthError, safeReturnTo, startFlow, type Flow, type Profile, type Provider } from './flows.js';
 import { completeSignup, pendingSignup } from './onboarding.js';
+import type { Avatars } from '../media/avatars.js';
+import { getUser } from '../repo/users.js';
 import { githubAuthorizeUrl, githubProfile } from './github.js';
 import { googleAuthorizeUrl, googleProfile } from './google.js';
 
@@ -26,7 +28,7 @@ const signupBody = z.object({
 
 const notFound = () => new HttpError(404, 'not_found', 'Not found');
 
-export function oauthRouter(pool: pg.Pool, sessions: SessionStore, config: Config, logger: Logger): Router {
+export function oauthRouter(pool: pg.Pool, sessions: SessionStore, config: Config, logger: Logger, avatars?: Avatars): Router {
   const router = Router();
   const secure = config.nodeEnv === 'production';
   const redirectUri = (p: Provider) => `${config.publicOrigin}/api/auth/${p}/callback`;
@@ -127,6 +129,8 @@ export function oauthRouter(pool: pg.Pool, sessions: SessionStore, config: Confi
       res.redirect(302, '/welcome');
       return;
     }
+    // The picture may have changed at the provider: our copy follows it at every sign-in.
+    await avatars?.refresh(result.userId, profile.avatarUrl);
     // Rotation: any session this browser had is revoked before the new one is issued.
     await startSession(sessions, req, res, result.userId, secure);
     res.redirect(302, flow.returnTo);
@@ -140,8 +144,11 @@ export function oauthRouter(pool: pg.Pool, sessions: SessionStore, config: Confi
   // …and creating the account signs it in (a fresh session; any previous one is revoked).
   router.post('/auth/onboarding', async (req, res) => {
     const input = signupBody.parse(req.body);
-    const user = await completeSignup(pool, parseCookie(req.get('cookie') ?? '')[SIGNUP_COOKIE], input);
+    const created = await completeSignup(pool, parseCookie(req.get('cookie') ?? '')[SIGNUP_COOKIE], input);
     res.clearCookie(SIGNUP_COOKIE, { path: AUTH_COOKIE_PATH });
+    // Our copy of the provider's picture (kept in avatar_url by the signup), before answering.
+    await avatars?.refresh(created.id);
+    const user = (await getUser(pool, created.id)) ?? created;
     await startSession(sessions, req, res, user.id, secure);
     res.status(201).json({ user });
   });

@@ -4,6 +4,7 @@ import type pg from 'pg';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { createRateLimits, type Limits } from '../src/limits.js';
+import type { AvatarFetcher } from '../src/media/avatars.js';
 import type { Storage } from '../src/media/storage.js';
 import { SESSION_COOKIE } from '../src/sessions.js';
 import { uniqueHandle } from './dbhelpers.js';
@@ -18,11 +19,14 @@ export const GENEROUS: Limits = {
 };
 
 /** The real app, logged in to Postgres as chitthi_api, with dev sign-in on and its own rate-limit namespace. */
-export function testApp(pool: pg.Pool, apiUrl: string, limits: Limits = GENEROUS, extra: { storage?: Storage; env?: Record<string, string> } = {}): Express {
+export function testApp(
+  pool: pg.Pool, apiUrl: string, limits: Limits = GENEROUS,
+  extra: { storage?: Storage; env?: Record<string, string>; fetchAvatar?: AvatarFetcher } = {},
+): Express {
   const config = testConfig({ DATABASE_URL: apiUrl, DEV_LOGIN: 'true', ...extra.env });
   const { logger } = captureLogger(config);
   const rateLimits = createRateLimits(pool, logger, limits, `t${randomBytes(4).toString('hex')}:`);
-  return createApp({ config, logger, pool, rateLimits, ...(extra.storage && { storage: extra.storage }) });
+  return createApp({ config, logger, pool, rateLimits, ...(extra.storage && { storage: extra.storage }), ...(extra.fetchAvatar && { fetchAvatar: extra.fetchAvatar }) });
 }
 
 export type Target = Express | string;

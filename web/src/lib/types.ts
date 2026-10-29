@@ -2,9 +2,14 @@
 export type { Attachment, Message, MessageEvent } from '../sync/sync.js';
 
 export type Role = 'owner' | 'admin' | 'member';
-export type User = { id: string; handle: string; displayName: string };
+/**
+ * avatarUrl: our server's copy of the person's picture (/api/users/<id>/avatar), never the
+ * provider's; null means initials. Lists that include strangers (search, blocks) leave it null
+ * unless you share a conversation, because the server refuses anyone else.
+ */
+export type User = { id: string; handle: string; displayName: string; avatarUrl: string | null };
 /** The signed-in user's own profile (/api/me). */
-export type Me = User & { avatarUrl: string | null };
+export type Me = User;
 export type Provider = 'google' | 'github';
 export type Providers = Record<Provider | 'dev', boolean>;
 export type Identity = { provider: Provider; email: string | null; linkedAt: string };
@@ -13,7 +18,7 @@ export type InboxEntry = {
   id: string;
   kind: 'direct' | 'group';
   title: string | null;
-  peer: { id: string; handle: string; displayName: string; deleted: boolean } | null;
+  peer: { id: string; handle: string; displayName: string; avatarUrl: string | null; deleted: boolean } | null;
   active: boolean;
   role: Role;
   lastSeq: number;
@@ -38,6 +43,7 @@ export type Member = {
   userId: string;
   handle: string;
   displayName: string;
+  avatarUrl: string | null;
   role: Role;
   joinedSeq: number;
   leftSeq: number | null;
@@ -62,7 +68,7 @@ export type ConversationDetail = {
   block: 'by_me' | 'by_them' | null;
 };
 
-export type BlockedUser = { userId: string; handle: string; displayName: string; blockedAt: string };
+export type BlockedUser = { userId: string; handle: string; displayName: string; avatarUrl: string | null; blockedAt: string };
 
 export type PresenceEvent = { userId: string; online: boolean; lastSeenAt: string | null };
 export type ReceiptEvent = { conversationId: string; userId: string; seq: number };

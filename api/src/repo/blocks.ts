@@ -2,11 +2,12 @@ import type pg from 'pg';
 import { HttpError } from '../errors.js';
 import { assertUuid } from './access.js';
 import { withTx, type Queryable } from './pg.js';
+import { visibleAvatarUrlSql } from './users.js';
 
 /** Between me and someone else: nothing, I blocked them, or they blocked me (mine wins if both). */
 export type BlockState = 'by_me' | 'by_them' | null;
 
-export type BlockedUser = { userId: string; handle: string; displayName: string; blockedAt: string };
+export type BlockedUser = { userId: string; handle: string; displayName: string; avatarUrl: string | null; blockedAt: string };
 
 /**
  * The same 403 for every refused path. Someone who was blocked can infer it from this (as in any
@@ -70,7 +71,7 @@ export async function unblock(pool: pg.Pool, blockerId: string, blockedId: strin
 
 export async function listBlocked(pool: pg.Pool, blockerId: string): Promise<BlockedUser[]> {
   const { rows } = await pool.query<BlockedUser>(
-    `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName", b.created_at AS "blockedAt"
+    `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName", ${visibleAvatarUrlSql('u', '$1')} AS "avatarUrl", b.created_at AS "blockedAt"
        FROM user_blocks b JOIN users u ON u.id = b.blocked_id
       WHERE b.blocker_id = $1 ORDER BY b.created_at DESC`,
     [blockerId],

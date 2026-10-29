@@ -10,6 +10,7 @@ import { errorHandler, notFound } from './errors.js';
 import { healthRouter } from './health.js';
 import { createRateLimits, limitBy, limitsFor, type RateLimits } from './limits.js';
 import { LocalStorage, type Storage } from './media/storage.js';
+import { avatarService, avatarsRouter, type AvatarFetcher } from './media/avatars.js';
 import { downloadsRouter } from './media/downloads.js';
 import { imageProcessor } from './media/image.js';
 import { purgeDeleted } from './media/lifecycle.js';
@@ -19,11 +20,14 @@ import { requireAllowedOrigin } from './origin.js';
 import { apiRoutes } from './routes.js';
 import { SessionStore } from './sessions.js';
 
-export type AppDeps = { config: Config; logger: Logger; pool: pg.Pool; rateLimits?: RateLimits; storage?: Storage };
+export type AppDeps = { config: Config; logger: Logger; pool: pg.Pool; rateLimits?: RateLimits; storage?: Storage; fetchAvatar?: AvatarFetcher };
 
 export function createApp({
   config, logger, pool, rateLimits = createRateLimits(pool, logger, limitsFor(config)), storage = new LocalStorage(config.mediaDir),
+  fetchAvatar,
 }: AppDeps): Express {
+  const images = imageProcessor(config.images);
+  const avatars = avatarService(pool, storage, images, logger, fetchAvatar);
   const sessions = new SessionStore(pool);
   const app = express();
   app.disable('x-powered-by');
@@ -45,14 +49,18 @@ export function createApp({
   api.use(['/auth', '/dev/login', '/dev/pending-signup'], limitBy(rateLimits.auth, (req) =>
     req.method === 'GET' && (req.path === '/providers' || req.path === '/identities') ? undefined : (req.ip ?? 'unknown'),
   ));
-  api.use(oauthRouter(pool, sessions, config, logger));
+  api.use(oauthRouter(pool, sessions, config, logger, avatars));
   // After a commit that marked attachments deleted: remove their files now. Never fails the
   // request (the delete already happened); anything left is the sweeper's to retry.
-  const purge = (scope: { messageId?: string; uploaderId?: string }) =>
-    purgeDeleted(pool, storage, logger, scope).catch((err: unknown) => { logger.warn({ err }, 'post-delete media purge failed; the sweeper will retry'); });
+  const purge = (scope: { messageId?: string; uploaderId?: string; avatarKey?: string | null }) =>
+    Promise.all([
+      purgeDeleted(pool, storage, logger, { ...(scope.messageId && { messageId: scope.messageId }), ...(scope.uploaderId && { uploaderId: scope.uploaderId }) }),
+      scope.avatarKey ? storage.delete(scope.avatarKey) : undefined,
+    ]).catch((err: unknown) => { logger.warn({ err }, 'post-delete media purge failed; the sweeper will retry'); });
   api.use(meRouter(pool, sessions, purge));
-  api.use(uploadsRouter(pool, sessions, storage, rateLimits, logger, diskGuard(storage, logger, config.diskGuard), imageProcessor(config.images)));
+  api.use(uploadsRouter(pool, sessions, storage, rateLimits, logger, diskGuard(storage, logger, config.diskGuard), images));
   api.use(downloadsRouter(pool, sessions, storage, logger));
+  api.use(avatarsRouter(pool, sessions, storage, logger));
   api.use(apiRoutes(pool, sessions, rateLimits, purge));
   if (config.devLogin) {
     logger.warn('dev login enabled: anyone can sign in as any handle');

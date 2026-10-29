@@ -52,7 +52,7 @@ export async function mockGoogle(clientId: string, clientSecret = 'g-secret') {
       const now = Math.floor(Date.now() / 1000);
       const claims = {
         iss: started.url, aud: clientId, sub: state.subject, email: state.email, email_verified: true,
-        name: 'Asha Rao', picture: 'https://lh3.example.com/a.png', nonce: state.nonce, iat: now, exp: now + 300,
+        name: 'Asha Rao', picture: 'https://lh3.googleusercontent.com/a/test-asha=s96-c', nonce: state.nonce, iat: now, exp: now + 300,
         ...state.scenario.claims,
       };
       const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
@@ -93,7 +93,7 @@ export async function mockGithub() {
     if (req.url === '/user') {
       return Promise.resolve(state.scenario.userStatus
         ? { status: state.scenario.userStatus, json: {} }
-        : { json: { id: state.id, login: 'ravi-k', name: 'Ravi Kumar', avatar_url: 'https://avatars.example.com/u/1' } });
+        : { json: { id: state.id, login: 'ravi-k', name: 'Ravi Kumar', avatar_url: 'https://avatars.githubusercontent.com/u/1?v=4' } });
     }
     if (req.url === '/user/emails') {
       return Promise.resolve({ json: state.scenario.emails ?? [

@@ -43,7 +43,7 @@ export function NewChat() {
             <li key={u.id}>
               <button type="button" onClick={() => { start.mutate(u); }} disabled={start.isPending}
                 className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-paper-deep">
-                <Avatar name={u.displayName} size={36} />
+                <Avatar name={u.displayName} src={u.avatarUrl} size={36} />
                 <span className="min-w-0">
                   <span className="block truncate font-medium text-ink">{u.displayName}</span>
                   <span className="block truncate text-sm text-ink-soft">@{u.handle}</span>

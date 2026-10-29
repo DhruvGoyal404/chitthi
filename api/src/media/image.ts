@@ -1,5 +1,6 @@
 import sharp, { type Metadata } from 'sharp';
 import { IMAGE_DEFAULTS, type ImageLimits } from '../config.js';
+import { sniff } from './sniff.js';
 
 export const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const IMAGE_MAX_EDGE = 2560;
@@ -7,6 +8,8 @@ export const IMAGE_MAX_EDGE = 2560;
 const FALLBACK_EDGE = 1600;
 export const THUMB_EDGE = 480;
 const PLACEHOLDER_EDGE = 16;
+/** Avatars are stored square at this edge: enough for 56 px on a 2x screen. */
+export const AVATAR_EDGE = 128;
 
 export type ImageFormat = 'jpeg' | 'png' | 'webp' | 'gif';
 export type ImageRejection = 'animated' | 'unreadable' | 'too_many_pixels' | 'too_large' | 'mismatch';
@@ -44,6 +47,12 @@ export type ImageProcessor = {
    * format family is kept (static GIF → PNG); animated images are refused.
    */
   process: (buf: Buffer, sniffed: ImageFormat) => Promise<ProcessedImage>;
+  /**
+   * A profile picture fetched from a sign-in provider, re-encoded the same way: format from the
+   * bytes (JPEG, PNG, WebP or GIF; anything else is refused), the first frame only, orientation
+   * applied, every piece of metadata dropped, centre-cropped to AVATAR_EDGE square, WebP.
+   */
+  avatar: (buf: Buffer) => Promise<Buffer>;
   readonly limits: ImageLimits;
   /** Images being decoded right now, and images waiting for a turn. */
   load: () => { running: number; waiting: number };
@@ -111,5 +120,20 @@ export function imageProcessor(limits: ImageLimits = IMAGE_DEFAULTS): ImageProce
     };
   });
 
-  return { process: run, limits, load: () => ({ running, waiting: waiting.length }) };
+  const avatar = (buf: Buffer) => slot(async (): Promise<Buffer> => {
+    const detected = sniff(buf.subarray(0, 16));
+    if (detected?.kind !== 'image') throw new ImageRejected('unreadable', 'not an image');
+    try {
+      const meta = await input(buf).metadata();
+      if (meta.format !== detected.format) throw new ImageRejected('mismatch', `bytes say ${detected.format}, decoder says ${meta.format}`);
+      return await sharp(buf, { limitInputPixels: limits.maxInputPixels, failOn: 'error', pages: 1 })
+        .rotate().resize(AVATAR_EDGE, AVATAR_EDGE, { fit: 'cover' }).toColourspace('srgb').webp({ quality: 80 }).toBuffer();
+    } catch (err) {
+      if (err instanceof ImageRejected) throw err;
+      const message = err instanceof Error ? err.message : '';
+      throw new ImageRejected(/pixel limit/i.test(message) ? 'too_many_pixels' : 'unreadable', message);
+    }
+  });
+
+  return { process: run, avatar, limits, load: () => ({ running, waiting: waiting.length }) };
 }

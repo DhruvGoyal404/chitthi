@@ -29,7 +29,7 @@ function Row({ c, selected, meId }: { c: InboxEntry; selected: boolean; meId: st
       <Link to={`/c/${c.id}`} aria-current={selected ? 'page' : undefined}
         className={`flex items-center gap-3 px-3 py-2.5 hover:bg-paper-deep ${selected ? 'bg-paper-deep' : ''}`}>
         <span className="relative">
-          <Avatar name={name} group={c.kind === 'group'} />
+          <Avatar name={name} group={c.kind === 'group'} src={c.peer?.avatarUrl} />
           {c.kind === 'direct' && presence && <PresenceDot online={presence.online} className="absolute -bottom-0.5 -right-0.5" />}
         </span>
         <span className="min-w-0 flex-1">

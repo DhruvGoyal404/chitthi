@@ -9,6 +9,8 @@ export const HANDLE_HOLD_DAYS = 30;
 export const DELETED_NAME = 'Deleted user';
 
 export type DeleteResult = { groupsLeft: number; ownershipTransferred: number; messagesErased: number };
+/** The stored avatar the deletion detached: the caller removes its file after the commit. */
+export type DeleteOutcome = DeleteResult & { avatarKey: string | null };
 
 /**
  * Deletes an account, in one transaction:
@@ -16,15 +18,16 @@ export type DeleteResult = { groupsLeft: number; ownershipTransferred: number; m
  *   windows stay exact); an owner's groups pass to the longest-standing admin, else member;
  * - optionally, every text message the user sent becomes a tombstone (body erased; rows and seqs stay);
  * - the handle is held for HANDLE_HOLD_DAYS, then the row is emptied: handle `del_<hex>`, name
- *   "Deleted user", no avatar; disabled_at (which disconnects every socket) and deleted_at set;
+ *   "Deleted user", no avatar (the stored copy's key is returned, for its file to be removed);
+ *   disabled_at (which disconnects every socket) and deleted_at set;
  * - identities, sessions, blocks (both ways) and OAuth flows are removed.
  * Direct conversations keep both members (the other person keeps the history); new messages
  * there are refused by the database.
  */
-export async function deleteAccount(pool: pg.Pool, userId: string, opts: { eraseMessages: boolean }): Promise<DeleteResult> {
+export async function deleteAccount(pool: pg.Pool, userId: string, opts: { eraseMessages: boolean }): Promise<DeleteOutcome> {
   return withTx(pool, async (tx) => {
-    const { rows: [user] } = await tx.query<{ handle: string }>(
-      'SELECT handle FROM users WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [userId],
+    const { rows: [user] } = await tx.query<{ handle: string; avatar_key: string | null }>(
+      'SELECT handle, avatar_key FROM users WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [userId],
     );
     if (!user) throw new HttpError(404, 'not_found', 'Account not found');
 
@@ -69,7 +72,7 @@ export async function deleteAccount(pool: pg.Pool, userId: string, opts: { erase
       [user.handle, userId, HANDLE_HOLD_DAYS],
     );
     await tx.query(
-      `UPDATE users SET handle = $2, display_name = $3, avatar_url = NULL, disabled_at = now(), deleted_at = now()
+      `UPDATE users SET handle = $2, display_name = $3, avatar_url = NULL, avatar_key = NULL, disabled_at = now(), deleted_at = now()
         WHERE id = $1`,
       [userId, `del_${randomBytes(8).toString('hex')}`, DELETED_NAME],
     );
@@ -80,6 +83,6 @@ export async function deleteAccount(pool: pg.Pool, userId: string, opts: { erase
     // Uploads never sent go in both modes (with eraseMessages, the tombstones above already
     // marked every attachment of the user's messages).
     await tx.query('UPDATE attachments SET deleted_at = now() WHERE uploader_id = $1 AND message_id IS NULL AND deleted_at IS NULL', [userId]);
-    return { groupsLeft: groups.length, ownershipTransferred, messagesErased };
+    return { groupsLeft: groups.length, ownershipTransferred, messagesErased, avatarKey: user.avatar_key };
   });
 }

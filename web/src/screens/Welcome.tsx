@@ -7,7 +7,8 @@ import { api, ApiError } from '../lib/api.js';
 import { providerName } from '../lib/authErrors.js';
 import type { Me, Provider } from '../lib/types.js';
 
-type Pending = { provider: Provider; email: string; displayName: string; avatarUrl: string | null; suggestedHandle: string };
+// No picture here: ours is made from the provider's when the account is created.
+type Pending = { provider: Provider; email: string; displayName: string; suggestedHandle: string };
 
 function WelcomeForm({ pending }: { pending: Pending }) {
   const qc = useQueryClient();
@@ -35,7 +36,7 @@ function WelcomeForm({ pending }: { pending: Pending }) {
   return (
     <form onSubmit={onSubmit} className="space-y-4" aria-label="Create your account">
       <div className="flex items-center gap-3">
-        <Avatar name={displayName || pending.displayName} src={pending.avatarUrl} size={56} />
+        <Avatar name={displayName || pending.displayName} size={56} />
         <p className="text-sm text-ink-soft">
           Signed in with {providerName(pending.provider)} as <span className="break-all text-ink">{pending.email}</span>.
         </p>

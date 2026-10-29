@@ -4,6 +4,7 @@ import { accessOf, assertUuid, notFound, requireActive, type Role } from './acce
 import { blockedError, blockedMe, blockState, type BlockState } from './blocks.js';
 import { isUniqueViolation, violates, withTx, type Queryable } from './pg.js';
 import { codePointLength } from './text.js';
+import { avatarUrlSql } from './users.js';
 
 export type Conversation = { id: string; kind: 'direct' | 'group'; title: string | null; createdBy: string; createdAt: Date };
 
@@ -201,7 +202,7 @@ export type InboxEntry = {
   kind: 'direct' | 'group';
   title: string | null;
   /** The other participant of a direct conversation. */
-  peer: { id: string; handle: string; displayName: string; deleted: boolean } | null;
+  peer: { id: string; handle: string; displayName: string; avatarUrl: string | null; deleted: boolean } | null;
   active: boolean;
   role: Role;
   lastSeq: number;
@@ -234,12 +235,13 @@ const unreadSql = (userParam: string) => `(SELECT count(*)::int FROM (
 
 /** Every conversation the user can read (active or read-only), most recent activity first. */
 export async function listConversations(pool: pg.Pool, userId: string, limit = 50): Promise<InboxEntry[]> {
-  const { rows } = await pool.query<InboxEntry & { peer_id: string | null; peer_handle: string | null; peer_name: string | null; peer_deleted: boolean | null }>(
+  const { rows } = await pool.query<InboxEntry & { peer_id: string | null; peer_handle: string | null; peer_name: string | null; peer_avatar: string | null; peer_deleted: boolean | null }>(
     `SELECT c.id, c.kind, c.title, c.last_seq AS "lastSeq", c.change_seq AS "changeSeq", c.last_message_at AS "lastMessageAt",
             p.left_at IS NULL AS active, p.role,
             r.last_read_seq AS "lastReadSeq", r.last_delivered_seq AS "lastDeliveredSeq",
             ${unreadSql('$1')} AS unread,
-            peer.id AS peer_id, peer.handle AS peer_handle, peer.display_name AS peer_name, peer.deleted_at IS NOT NULL AS peer_deleted,
+            peer.id AS peer_id, peer.handle AS peer_handle, peer.display_name AS peer_name, ${avatarUrlSql('peer')} AS peer_avatar,
+            peer.deleted_at IS NOT NULL AS peer_deleted,
             (SELECT json_build_object('seq', x.seq, 'senderId', x.sender_id, 'kind', x.kind, 'body', x.body,
                                       'meta', x.meta, 'deletedAt', x.deleted_at, 'createdAt', x.created_at,
                                       'attachmentKinds', COALESCE((SELECT json_agg(a.kind ORDER BY a.position) FROM attachments a
@@ -257,9 +259,11 @@ export async function listConversations(pool: pg.Pool, userId: string, limit = 5
       LIMIT $2`,
     [userId, limit],
   );
-  return rows.map(({ peer_id, peer_handle, peer_name, peer_deleted, ...e }) => ({
+  return rows.map(({ peer_id, peer_handle, peer_name, peer_avatar, peer_deleted, ...e }) => ({
     ...e,
-    peer: peer_id && peer_handle ? { id: peer_id, handle: peer_handle, displayName: peer_name ?? peer_handle, deleted: peer_deleted === true } : null,
+    peer: peer_id && peer_handle
+      ? { id: peer_id, handle: peer_handle, displayName: peer_name ?? peer_handle, avatarUrl: peer_avatar, deleted: peer_deleted === true }
+      : null,
   }));
 }
 
@@ -282,6 +286,7 @@ export type Member = {
   userId: string;
   handle: string;
   displayName: string;
+  avatarUrl: string | null;
   role: Role;
   /** The latest membership period. */
   joinedSeq: number;
@@ -316,7 +321,7 @@ export async function getConversation(pool: pg.Pool, conversationId: string, use
   );
   if (!conv) throw notFound();
   const { rows: members } = await pool.query<Member>(
-    `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName", p.role, p.joined_seq AS "joinedSeq",
+    `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName", ${avatarUrlSql('u')} AS "avatarUrl", p.role, p.joined_seq AS "joinedSeq",
             p.left_seq AS "leftSeq", p.left_at IS NULL AS active,
             r.last_read_seq AS "lastReadSeq", r.last_delivered_seq AS "lastDeliveredSeq", u.deleted_at IS NOT NULL AS deleted
        FROM (SELECT DISTINCT ON (user_id) * FROM conversation_memberships

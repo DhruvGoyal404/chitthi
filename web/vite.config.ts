@@ -17,7 +17,8 @@ export const WEB_CSP = [
   "script-src 'self'",
   "style-src 'self'",
   // blob: only for previews of the user's own files before they are sent.
-  "img-src 'self' https: data: blob:",
+  // Avatars are served by our own API (media/avatars.ts): no third-party image can load at all.
+  "img-src 'self' data: blob:",
   "font-src 'self'",
   "connect-src 'self'",
   "object-src 'none'",

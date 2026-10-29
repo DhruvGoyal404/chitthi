@@ -48,8 +48,8 @@ export async function sweepOrphans(pool: pg.Pool): Promise<number> {
 }
 
 /**
- * Removes stored objects that no attachment row knows about (a crash between storing a file and
- * inserting its row), once they are older than the orphan window so an upload in progress is
+ * Removes stored objects that no attachment row and no user's avatar_key knows about (a crash
+ * between storing a file and inserting its row, an avatar replaced by a concurrent refresh), once they are older than the orphan window so an upload in progress is
  * never touched; and partial writes left in the store's temporary area.
  */
 export async function reconcileStore(pool: pg.Pool, storage: Storage, now = new Date()): Promise<number> {
@@ -60,7 +60,8 @@ export async function reconcileStore(pool: pg.Pool, storage: Storage, now = new 
     if (batch.length === 0) return;
     const { rows } = await pool.query<{ key: string }>(
       `SELECT k AS key FROM unnest($1::text[]) AS k
-        WHERE NOT EXISTS (SELECT 1 FROM attachments a WHERE a.storage_key = k OR a.thumb_key = k)`,
+        WHERE NOT EXISTS (SELECT 1 FROM attachments a WHERE a.storage_key = k OR a.thumb_key = k)
+          AND NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar_key = k)`,
       [batch],
     );
     for (const { key } of rows) {

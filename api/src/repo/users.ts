@@ -2,12 +2,32 @@ import type pg from 'pg';
 import { HttpError } from '../errors.js';
 import { isUniqueViolation, violates, withTx } from './pg.js';
 
-export type User = { id: string; handle: string; displayName: string };
+/** avatarUrl: our own copy of the person's picture (/api/users/<id>/avatar), or null for initials. */
+export type User = { id: string; handle: string; displayName: string; avatarUrl: string | null };
 
-const USER_COLUMNS = 'u.id, u.handle, u.display_name AS "displayName"';
+/**
+ * The address of a user's stored avatar, as SQL over the users row `alias`. The ?v= part changes
+ * whenever the picture does, so a browser's cached copy is never stale. Served only to the user
+ * and to people who share a conversation with them (media/avatars.ts); anyone else gets a 404.
+ */
+export const avatarUrlSql = (alias: string) =>
+  `CASE WHEN ${alias}.avatar_key IS NULL THEN NULL ELSE '/api/users/' || ${alias}.id || '/avatar?v=' || left(${alias}.avatar_key, 12) END`;
+
+/**
+ * The same, but null unless `viewerParam` shares (or shared) a conversation with the user: for
+ * lists that include strangers (search, blocks), whose avatar the server would refuse anyway.
+ */
+export const visibleAvatarUrlSql = (alias: string, viewerParam: string) =>
+  `CASE WHEN EXISTS (SELECT 1 FROM conversation_memberships va JOIN conversation_memberships vb ON vb.conversation_id = va.conversation_id
+                      WHERE va.user_id = ${viewerParam} AND vb.user_id = ${alias}.id)
+        THEN ${avatarUrlSql(alias)} END`;
+
+const USER_COLUMNS = `u.id, u.handle, u.display_name AS "displayName", ${avatarUrlSql('u')} AS "avatarUrl"`;
+/** For lists that include strangers: the avatar only where the caller ($2 in those queries) may see it. */
+const LISTED_COLUMNS = `u.id, u.handle, u.display_name AS "displayName", ${visibleAvatarUrlSql('u', '$2')} AS "avatarUrl"`;
 /** The signed-in user's own view of themselves. */
-export type Me = User & { avatarUrl: string | null };
-const ME_COLUMNS = `${USER_COLUMNS}, u.avatar_url AS "avatarUrl"`;
+export type Me = User;
+const ME_COLUMNS = USER_COLUMNS;
 
 /**
  * The dev sign-in's user: identity ('dev', lower(handle)) → user, created on first use with the
@@ -57,7 +77,7 @@ export function mapUserError(err: unknown): unknown {
 /** Exact, case-insensitive handle lookup of an active user who hasn't blocked the caller. */
 export async function findUserByHandle(pool: pg.Pool, handle: string, callerId: string): Promise<User | undefined> {
   const { rows: [user] } = await pool.query<User>(
-    `SELECT ${USER_COLUMNS} FROM users u WHERE lower(u.handle) = lower($1) AND u.disabled_at IS NULL
+    `SELECT ${LISTED_COLUMNS} FROM users u WHERE lower(u.handle) = lower($1) AND u.disabled_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = u.id AND b.blocked_id = $2)`, [handle, callerId],
   );
   return user;
@@ -91,7 +111,7 @@ export async function updateProfile(pool: pg.Pool, id: string, patch: { handle?:
 export async function searchUsers(pool: pg.Pool, prefix: string, callerId: string, limit = 8): Promise<User[]> {
   const pattern = `${prefix.toLowerCase().replaceAll('_', '\\_')}%`;
   const { rows } = await pool.query<User>(
-    `SELECT ${USER_COLUMNS} FROM users u
+    `SELECT ${LISTED_COLUMNS} FROM users u
       WHERE lower(u.handle) LIKE $1 AND u.id <> $2 AND u.disabled_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = u.id AND b.blocked_id = $2)
       ORDER BY lower(u.handle) LIMIT $3`,

@@ -33,7 +33,8 @@ export type ResetReport = { messagesTombstoned: number; attachmentsDeleted: numb
  * In one transaction, as the table owner: every message that carried attachments becomes a
  * tombstone (a media message without its media would just look broken), every attachment row
  * is deleted (the no-delete trigger is switched off for that statement only, inside the
- * transaction), and the daily upload quota counters are cleared. Then the media folder goes.
+ * transaction), stored avatars are forgotten (users fall back to initials until they sign in
+ * again), and the daily upload quota counters are cleared. Then the media folder goes.
  */
 export async function resetDevMedia(client: pg.ClientBase, mediaDir: string): Promise<ResetReport> {
   let report: ResetReport;
@@ -43,6 +44,7 @@ export async function resetDevMedia(client: pg.ClientBase, mediaDir: string): Pr
     await client.query('ALTER TABLE attachments DISABLE TRIGGER attachments_forbid_delete');
     const deleted = await client.query('DELETE FROM attachments');
     await client.query('ALTER TABLE attachments ENABLE TRIGGER attachments_forbid_delete');
+    await client.query('UPDATE users SET avatar_key = NULL WHERE avatar_key IS NOT NULL');
     const quota = await client.query("DELETE FROM rate_limits WHERE key LIKE 'uploadCount:%' OR key LIKE 'uploadBytes:%'");
     await client.query('COMMIT');
     report = { messagesTombstoned: tombstoned.rowCount ?? 0, attachmentsDeleted: deleted.rowCount ?? 0, quotaCountersCleared: quota.rowCount ?? 0 };

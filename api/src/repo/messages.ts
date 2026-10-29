@@ -7,6 +7,7 @@ import { isUniqueViolation, violates, withTx } from './pg.js';
 import type { AttachmentInfo } from '../media/uploads.js';
 import type { StageTimer } from '../timing.js';
 import { codePointLength } from './text.js';
+import { avatarUrlSql } from './users.js';
 
 export type Message = {
   id: string;
@@ -308,7 +309,7 @@ function reviveDates(m: Message): Message {
   return { ...m, createdAt: new Date(m.createdAt), editedAt: d(m.editedAt), deletedAt: d(m.deletedAt) };
 }
 
-export type Receipt = { userId: string; handle: string; displayName: string; deliveredAt: Date | null; readAt: Date | null };
+export type Receipt = { userId: string; handle: string; displayName: string; avatarUrl: string | null; deliveredAt: Date | null; readAt: Date | null };
 
 /**
  * Who received and read one of your messages, and when (the group "message info" panel). Only the
@@ -325,7 +326,7 @@ export async function messageReceipts(pool: pg.Pool, input: { conversationId: st
   if (!m) throw new HttpError(404, 'not_found', 'Message not found');
   if (m.sender_id !== input.userId) throw new HttpError(403, 'forbidden', 'Only the sender can see who read a message');
   const { rows } = await pool.query<Receipt>(
-    `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName",
+    `SELECT u.id AS "userId", u.handle, u.display_name AS "displayName", ${avatarUrlSql('u')} AS "avatarUrl",
             (SELECT min(e.at) FROM marker_events e WHERE e.conversation_id = $1 AND e.user_id = u.id
                 AND e.kind = 'delivered' AND e.upto_seq >= $2) AS "deliveredAt",
             (SELECT min(e.at) FROM marker_events e WHERE e.conversation_id = $1 AND e.user_id = u.id

@@ -8,7 +8,7 @@ import { fullWhen } from '../lib/format.js';
 import { useMessages, useRealtime } from '../realtime/hooks.js';
 import { BackLink } from './Shell.js';
 
-type Receipt = { userId: string; handle: string; displayName: string; deliveredAt: string | null; readAt: string | null };
+type Receipt = { userId: string; handle: string; displayName: string; avatarUrl: string | null; deliveredAt: string | null; readAt: string | null };
 
 function Section({ title, people, when }: { title: string; people: Receipt[]; when: (r: Receipt) => string | null }) {
   if (people.length === 0) return null;
@@ -20,7 +20,7 @@ function Section({ title, people, when }: { title: string; people: Receipt[]; wh
           const t = when(r);
           return (
             <li key={r.userId} className="flex items-center gap-3 py-2">
-              <Avatar name={r.displayName} size={32} />
+              <Avatar name={r.displayName} src={r.avatarUrl} size={32} />
               <span className="min-w-0 flex-1 truncate text-ink">{r.displayName}</span>
               {t && <time dateTime={t} className="text-xs text-ink-soft">{fullWhen(t)}</time>}
             </li>

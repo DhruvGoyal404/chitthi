@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { Express } from 'express';
+import sharp from 'sharp';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, inject } from 'vitest';
 import { createApp } from '../src/app.js';
@@ -15,6 +16,12 @@ import { mockGithub, mockGoogle } from './mockProviders.js';
 const apiUrl = inject('apiDbUrl');
 const ownerUrl = inject('dbUrl');
 const GOOGLE_ID = 'google-client.apps.example';
+/** Stands in for the providers' avatar servers (no network in tests): a PNG, and the URLs asked for. */
+const fetched: string[] = [];
+const fetchAvatar = async (url: URL): Promise<Buffer> => {
+  fetched.push(url.href);
+  return sharp({ create: { width: 300, height: 200, channels: 3, background: { r: 200, g: 40, b: 40 } } }).png().toBuffer();
+};
 
 type Cookies = Record<string, string>;
 const cookiesOf = (res: request.Response): Cookies => {
@@ -61,7 +68,7 @@ describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => 
       GITHUB_AUTH_URL: `${github.url}/auth`, GITHUB_TOKEN_URL: `${github.url}/token`, GITHUB_API_URL: github.url,
     });
     const { logger } = captureLogger(config);
-    app = createApp({ config, logger, pool, rateLimits: createRateLimits(pool, logger, GENEROUS, `t${randomBytes(4).toString('hex')}:`) });
+    app = createApp({ config, logger, pool, rateLimits: createRateLimits(pool, logger, GENEROUS, `t${randomBytes(4).toString('hex')}:`), fetchAvatar });
   });
   afterAll(async () => {
     await Promise.all([google.close(), github.close(), pool.end(), admin.end()]);
@@ -276,7 +283,8 @@ describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => 
       const signup = await pending();
       const info = await request(app).get('/api/auth/onboarding').set('Cookie', cookieHeader(signup));
       expect(info.status).toBe(200);
-      expect(info.body).toMatchObject({ provider: 'google', email: google.state.email, displayName: 'Asha Rao', avatarUrl: 'https://lh3.example.com/a.png' });
+      expect(info.body).toMatchObject({ provider: 'google', email: google.state.email, displayName: 'Asha Rao' });
+      expect(info.body).not.toHaveProperty('avatarUrl'); // the provider's address never reaches the browser
       expect(info.body.suggestedHandle).toMatch(/^g_[0-9a-f]{8}$/); // the email's local part, free and not reserved
 
       // A reserved or taken handle is refused and the signup stays usable.
@@ -288,12 +296,18 @@ describe.skipIf(!apiUrl)('Google OIDC and GitHub OAuth (mock providers)', () => 
       const handle = `asha_${randomBytes(3).toString('hex')}`;
       const done = await finish({ ...signup, [SESSION_COOKIE]: 'planted-token' }, { handle, displayName: ' Asha R ' });
       expect(done.status).toBe(201);
-      expect(done.body.user).toMatchObject({ handle, displayName: 'Asha R', avatarUrl: 'https://lh3.example.com/a.png' });
+      // Our copy, made from the provider's picture (asked for at 256 px) before the answer.
+      const ours = new RegExp(`^/api/users/${String(done.body.user.id)}/avatar\\?v=[0-9a-f]{12}$`);
+      expect(done.body.user).toMatchObject({ handle, displayName: 'Asha R', avatarUrl: expect.stringMatching(ours) });
+      expect(fetched.at(-1)).toBe('https://lh3.googleusercontent.com/a/test-asha=s256-c');
       const session = cookiesOf(done)[SESSION_COOKIE];
       expect(session).toMatch(/^[\w-]{43}$/);
       expect(cookiesOf(done)[SIGNUP_COOKIE]).toBe(''); // cleared
       const me = await request(app).get('/api/me').set('Cookie', `${SESSION_COOKIE}=${session ?? ''}`);
-      expect(me.body.user).toMatchObject({ id: done.body.user.id, handle, avatarUrl: 'https://lh3.example.com/a.png' });
+      expect(me.body.user).toMatchObject({ id: done.body.user.id, handle, avatarUrl: done.body.user.avatarUrl });
+      const pic = await request(app).get(String(done.body.user.avatarUrl)).set('Cookie', `${SESSION_COOKIE}=${session ?? ''}`);
+      expect(pic.status).toBe(200);
+      expect(pic.headers['content-type']).toBe('image/webp');
 
       // Single use; and the next Google sign-in is a plain sign-in to this account.
       expect((await finish(signup, { handle: `${handle}2`, displayName: 'Asha' })).body.error.code).toBe('signup_expired');
@@ -350,7 +364,7 @@ describe.skipIf(!apiUrl)('TRUST_PROXY decides whose IP the sign-in limit counts'
     const config = testConfig({ DATABASE_URL: apiUrl, TRUST_PROXY: trustProxy, GITHUB_CLIENT_ID: 'id', GITHUB_CLIENT_SECRET: 'secret' });
     const { logger } = captureLogger(config);
     const rateLimits = createRateLimits(pool, logger, { ...GENEROUS, auth: { points: 2, duration: 60 } }, `t${randomBytes(4).toString('hex')}:`);
-    return createApp({ config, logger, pool, rateLimits });
+    return createApp({ config, logger, pool, rateLimits, fetchAvatar });
   };
   const startFrom = (app: Express, ip: string) => request(app).get('/api/auth/github/start').set('X-Forwarded-For', ip);
 
