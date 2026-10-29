@@ -65,31 +65,36 @@ arm_maybe() { # <path>: GET; prints nothing (and succeeds) when the resource doe
 preflight() {
   local c s state
   for c in az jq curl; do command -v "$c" >/dev/null || die "'$c' is not installed"; done
-  step "Azure sign-in and subscription"
-  command az account show --output none 2>/dev/null || command az login --output none
-  pick() {
-    for s in $(az account list --query "[?name=='Azure for Students'].id" --output tsv) \
-             $(az account list --query "[?name!='Azure for Students'].id" --output tsv); do
-      if [[ $(az group exists --name "$HOST_RG" --subscription "$s" 2>/dev/null) == true ]]; then
-        az account set --subscription "$s"
-        SUB=$s
-        return 0
-      fi
-    done
-    return 1
-  }
-  if ! pick; then
-    log "no subscription you're signed in to holds resource group $HOST_RG: signing in"
-    command az login --output none
-    pick || die "no subscription you can sign in to holds resource group $HOST_RG"
+  if [[ -n ${PREFLIGHT_SUB:-} ]]; then # host-up/down.sh under an app script that already did all this
+    SUB=$PREFLIGHT_SUB
+  else
+    step "Azure sign-in and subscription"
+    command az account show --output none 2>/dev/null || command az login --output none
+    pick() {
+      for s in $(az account list --query "[?name=='Azure for Students'].id" --output tsv) \
+               $(az account list --query "[?name!='Azure for Students'].id" --output tsv); do
+        if [[ $(az group exists --name "$HOST_RG" --subscription "$s" 2>/dev/null) == true ]]; then
+          az account set --subscription "$s"
+          SUB=$s
+          return 0
+        fi
+      done
+      return 1
+    }
+    if ! pick; then
+      log "no subscription you're signed in to holds resource group $HOST_RG: signing in"
+      command az login --output none
+      pick || die "no subscription you can sign in to holds resource group $HOST_RG"
+    fi
+    # The CLI caches a subscription's state; ARM has the real one.
+    state=$(arm get "/subscriptions/$SUB?api-version=2022-12-01" | jq -r .state)
+    if [[ $state != Enabled ]]; then
+      [[ $1 == allow-disabled ]] || die "the subscription is '$state' (ARM): fix billing at portal.azure.com → Subscriptions first"
+      warn "the subscription is '$state' (ARM): going on, since this only stops things"
+    fi
+    log "subscription $(az account show --query name --output tsv) ($SUB): $state"
+    export PREFLIGHT_SUB=$SUB
   fi
-  # The CLI caches a subscription's state; ARM has the real one.
-  state=$(arm get "/subscriptions/$SUB?api-version=2022-12-01" | jq -r .state)
-  if [[ $state != Enabled ]]; then
-    [[ $1 == allow-disabled ]] || die "the subscription is '$state' (ARM): fix billing at portal.azure.com → Subscriptions first"
-    warn "the subscription is '$state' (ARM): going on, since this only stops things"
-  fi
-  log "subscription $(az account show --query name --output tsv) ($SUB): $state"
   SUB_SCOPE=/subscriptions/$SUB
   VM_ID=$SUB_SCOPE/resourceGroups/$HOST_RG/providers/Microsoft.Compute/virtualMachines/$VM
   PIP_ID=$SUB_SCOPE/resourceGroups/$HOST_RG/providers/Microsoft.Network/publicIPAddresses/$PIP
@@ -151,9 +156,9 @@ host_ip() { arm_maybe "$PIP_ID?api-version=$API_NET" | jq -r '.properties.ipAddr
 
 # Every resource in the subscription, priced while the host is down (audit.jq). Prints a table and
 # returns 1 if anything bills beyond the expected pennies.
-audit() {
+audit() { # [step prefix, e.g. "4/4 "]
   local resources disks vms='{}' storage='{}' mtd id first free_until bytes report
-  step "Audit: everything in the subscription that could bill"
+  step "${1:-}Audit: everything in the subscription that could bill"
   resources=$(arm get "$SUB_SCOPE/resources?\$expand=createdTime&api-version=$API_RES" | jq -c .value)
   disks=$(arm get "$SUB_SCOPE/providers/Microsoft.Compute/disks?api-version=2023-04-02" | jq -c .value)
   for id in $(jq -r '.[] | select(.type | ascii_downcase == "microsoft.compute/virtualmachines") | .id' <<<"$resources"); do

@@ -75,5 +75,4 @@ else
   log "already deleted"
 fi
 
-step "4/4"
-audit
+audit "4/4 "

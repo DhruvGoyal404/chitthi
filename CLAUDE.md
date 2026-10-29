@@ -73,7 +73,14 @@ These hold for every change. A change that breaks one of them is a bug, even if 
   - web: attach / drag-and-drop / paste, previews, progress, cancel, retry, lightbox.
 
   Tests cover spoofed types, polyglots, mid-stream cut-off, traversal names, EXIF stripping, non-member and left-member access, the sweeper, quotas and disk failure. **Done.** Voice notes and video are out of scope (see Non-goals). |
-| 7 | Deploy | Production images (Node 22 LTS, non-root, pinned digests). Media stays on the VM's data disk through the existing local driver; a presigned object-storage adapter is a stretch goal. CI covers lint, typecheck, test and build. On a clean checkout, `docker compose -p chitthi up` serves web, API and DB on the assigned ports. Secrets live only in the platform's secret store. |
+| 7 | Deploy | Production images (Node 22 LTS, non-root, pinned digests). Media stays on the VM's data disk through the existing local driver; a presigned object-storage adapter is a stretch goal. CI covers lint, typecheck, test and build. On a clean checkout, `docker compose -p chitthi up` serves web, API and DB on the assigned ports. Secrets live only in the platform's secret store. **Done** (go-live finished 2026-10-30; [docs/MAINTENANCE.md](docs/MAINTENANCE.md)). |
+
+## Production
+
+- **The site is normally DOWN.** It runs on an Azure VM (`apps-vm`) only when needed: `bash chitthi-up.sh` brings it up (about 6 minutes, with a new IPv4 each time) and `bash chitthi-down.sh` takes it down, ending with an audit that must say "audit clean". Both are in [MAINTENANCE.md, "Up and down"](docs/MAINTENANCE.md).
+- **Deploys need the VM up.** A push to `main` that passes CI waits for the owner's approval in the Deploy workflow. On a down site, `run-on-vm.sh` fails at once with "run chitthi-up.sh first". The same goes for `setup.sh check` and anything sent through Run Command.
+- **Hisaab will join the same VM later,** through `deploy/azure/lib.sh`, `host-up.sh` and `host-down.sh`, with its own thin `hisaab-up/down.sh`. `host-down.sh` refuses while another app is tagged on the VM unless `also=<app>` names it. Run the other app's `--app-only` down first.
+- **Before 2027-10-24, decide about the two P6 disks.** The free 12 months end that day, and the disks then bill about ₹980 a month each, up or down.
 
 ## Commands
 

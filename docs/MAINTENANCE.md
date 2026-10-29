@@ -115,6 +115,10 @@ The `<6 hex>` suffix comes from the subscription id, so every run finds the same
 
 ### Going live, in order
 
+**Go-live is complete:** started 2026-10-24 (Azure setup and the first deploy), finished
+2026-10-30 (step 31's first real up/down cycle). Results are in the incident log. Keep the steps
+for a rebuild.
+
 Everything you do by hand, in order. Every command runs in Azure Cloud Shell (Bash), in a clone
 of this repo, unless a step says GitHub, a browser or another service.
 
@@ -192,7 +196,7 @@ of this repo, unless a step says GitHub, a browser or another service.
     - Add a monitor of type Keyword on `https://chitthi.dhruvgoyal.tech/api/health`. Keyword `"db":"ok"`, alert when the keyword does not exist, every 5 minutes. Alert contact: your email; confirm the address when UptimeRobot asks.
     - **Test alert:** change the keyword to `"db":"never"`, wait for the "down" email (up to about 10 minutes), then set it back to `"db":"ok"` and wait for the "up" email.
     - If your plan offers SSL-expiry reminders on the monitor, turn them on, 14 days ahead. Either way the VM checks the certificate every night: the `chitthi-backup` check turns red with 14 days left.
-28. **Test Azure's alert email:** Portal → Monitor → Alerts → Action groups → `ops-email` → Test action group → Email. The email must arrive.
+28. **Test Azure's alert email:** Portal → Monitor → Alerts → Action groups → `ops-email` → Test action group → Email. The email must arrive. (On 2026-10-30 the portal's test returned a generic failure, but real alerts had already arrived through `ops-email`: `vm-unavailable` fired and resolved, plus `role-assignment-changed` and `vm-resource-health`. Real alerts count as the proof.)
 29. **Rehearse a broken deploy:**
     - Actions → Deploy → Run workflow (branch `main`, action `rehearse-rollback`), then approve.
     - It deploys a release whose API can't start. The run must end green, with "the broken release failed and rolled itself back" and the outside check ok.
@@ -201,7 +205,7 @@ of this repo, unless a step says GitHub, a browser or another service.
     - 2026-10-26: the zod upgrade. 2026-11-06: the body-parser upgrade ("Pending dependency upgrades").
     - Every month after the drill email: the media compaction ("Backups").
     - The first time Azure bills you: a look at Cost Management.
-    - A month before the free 12 months end (`host-down.sh audit` prints the date): the disk decision ("What it costs").
+    - **Before 2027-10-24, decide about the two P6 disks.** The free 12 months end then, and from that day they bill about ₹980 a month each, up or down (≈ ₹1,960 together, four times the ₹500 budget). Options are in "What it costs"; `host-down.sh audit` starts printing STILL BILLING on that date.
 31. **Up and down** (added 2026-10-30): `bash deploy/azure/setup.sh infra alert_email=<you@…>` once more (the ops vault, your role on it, the ₹500 budget), make the three tokens in "Up and down", store them with `bash deploy/azure/setup.sh secrets`, then run "Up and down, for real: the full cycle".
 
 That's go-live. From now on, every push to `main` that passes CI and changes more than docs waits for your approval, then deploys itself.
@@ -868,6 +872,16 @@ At worst you lose everything since last night's backup (02:00 IST).
 - **Recovery:** the next run fills the missing R2 media by itself (it uploads what R2's listing lacks). Nothing on R2 needs deleting, and the 30-day lock wouldn't allow it.
 
 **2026-10-29: the selftest after the curl change.** Every check passed but one: R2 refused the second create with 409, where the selftest expected 412. A false FAIL, like Azure's 403: the probe read back intact, and overwrite and delete were refused (409). The selftest now accepts 409 or 412. `run` and `drill` passed the same day, with R2 caught up.
+
+**2026-10-30: go-live complete, and the first real up/down cycle.**
+- **Step 28:** the portal's "Test action group" failed with a generic error. Delivery is proven anyway: real `vm-unavailable` (fired and resolved), `role-assignment-changed` and `vm-resource-health` alerts reached the inbox through `ops-email`.
+- **Step 29:** `rehearse-rollback` ran green: "deploy: FAILED: the API or web container did not become healthy; rolled back to the previous release", then "rehearsal: the broken release failed and rolled itself back", and every outside check was ok afterwards.
+- **The cycle,** from Git Bash on the owner's laptop with their own `az login`:
+  - `chitthi-up.sh` on the already-live site: exit 0 in 4 min 15 s;
+  - `chitthi-down.sh`: exit 0, "audit clean", the site offline;
+  - `chitthi-up.sh` from fully down: exit 0 in 5 min 49 s. New IPv4 85.211.242.223, DNS updated, the same certificate (from the data disk), monitors resumed, every dependency check ok, old messages intact;
+  - `chitthi-down.sh` again: the site's normal state is DOWN.
+- **Follow-up:** the UptimeRobot monitor exists; it is being switched to a Keyword monitor on `"db":"ok"` (step 27).
 
 ## Pending dependency upgrades
 
