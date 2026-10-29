@@ -133,7 +133,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Shellcheck
-        run: shellcheck scripts/check-images.sh scripts/audit.sh deploy/smoke/smoke.sh deploy/host/*.sh deploy/azure/*.sh
+        run: shellcheck scripts/check-images.sh scripts/audit.sh deploy/smoke/smoke.sh deploy/host/*.sh deploy/azure/*.sh chitthi-up.sh chitthi-down.sh
       - name: Build the API image
         run: docker build -f api/Dockerfile --target api -t chitthi-api:ci .
       - name: Build the migrate image

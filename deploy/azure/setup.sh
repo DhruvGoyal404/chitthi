@@ -21,6 +21,8 @@
 #   - the backup storage account and container: the VM's identity may only create and read blobs
 #     there; lifecycle rules expire dumps, manifests and selftest probes; 14 days of soft delete;
 #   - Key Vault: the VM's identity reads secrets, the owner manages them;
+#   - the ops vault: tokens only chitthi-up.sh and chitthi-down.sh use (Cloudflare DNS, the
+#     monitors' APIs). The VM has no access to it: a compromised VM can't repoint DNS;
 #   - the deploy identity, which GitHub Actions signs in as (OIDC, environment "production"); it
 #     may only use Run Command on this VM.
 set -euo pipefail
@@ -60,6 +62,7 @@ SECRETS=(
   chitthi-r2-endpoint chitthi-r2-access-key-id chitthi-r2-secret-access-key
   chitthi-hc-backup-url chitthi-hc-drill-url
 )
+OPS_SECRETS=(chitthi-cloudflare-dns-token chitthi-hc-api-key chitthi-uptimerobot-api-key) # in $OPS_KV
 
 log() { echo "setup: $*"; }
 die() { echo "setup: FAILED: $*" >&2; exit 1; }
@@ -108,12 +111,14 @@ SUB_NAME=$(v account show --query name)
 # Globally unique names, the same on every run for this subscription.
 sfx=$(printf '%s' "$SUB" | sha256sum | cut -c1-6)
 KV=chitthi-kv-$sfx
+OPS_KV=chitthi-ops-$sfx
 SA=chitthibk$sfx
 SUB_SCOPE=/subscriptions/$SUB
 VM_ID=$SUB_SCOPE/resourceGroups/$HOST_RG/providers/Microsoft.Compute/virtualMachines/$VM
 SA_ID=$SUB_SCOPE/resourceGroups/$APP_RG/providers/Microsoft.Storage/storageAccounts/$SA
 CONTAINER_ID=$SA_ID/blobServices/default/containers/$CONTAINER
 KV_ID=$SUB_SCOPE/resourceGroups/$APP_RG/providers/Microsoft.KeyVault/vaults/$KV
+OPS_KV_ID=$SUB_SCOPE/resourceGroups/$APP_RG/providers/Microsoft.KeyVault/vaults/$OPS_KV
 AG_ID=$SUB_SCOPE/resourceGroups/$HOST_RG/providers/microsoft.insights/actionGroups/$ACTION_GROUP
 
 me() { v ad signed-in-user show --query id; }
@@ -363,6 +368,8 @@ key_vault() {
     || q keyvault create -g "$APP_RG" -n "$KV" -l "$LOCATION" --sku standard \
          --enable-rbac-authorization true --enable-purge-protection true --retention-days 90
   lock "$APP_RG" "$KV" Microsoft.KeyVault/vaults "Secrets, including the backups' private key"
+  log "ops vault: $OPS_KV (the owner only)"
+  exists keyvault show -g "$APP_RG" -n "$OPS_KV"     || q keyvault create -g "$APP_RG" -n "$OPS_KV" -l "$LOCATION" --sku standard --enable-rbac-authorization true --retention-days 7
 }
 
 identities() { # <owner's object id>
@@ -380,6 +387,7 @@ identities() { # <owner's object id>
   assign "$vm_pid" ServicePrincipal "Key Vault Secrets User" "$KV_ID"
   # The owner: manages secrets, and runs the media compaction (which deletes).
   assign "$1" User "Key Vault Secrets Officer" "$KV_ID"
+  assign "$1" User "Key Vault Secrets Officer" "$OPS_KV_ID"
   assign "$1" User "Storage Blob Data Contributor" "$CONTAINER_ID"
 
   exists identity show -g "$APP_RG" -n "$DEPLOY_ID" || q identity create -g "$APP_RG" -n "$DEPLOY_ID" -l "$LOCATION"
@@ -441,10 +449,10 @@ set_budget() { # <email> [amount]
     --body '{"type":"ActualCost","timeframe":"MonthToDate","dataset":{"granularity":"None","aggregation":{"cost":{"name":"Cost","function":"Sum"}}}}' \
     --query 'properties.rows[0][1]' --output tsv 2>/dev/null || true)
   if [[ -z $amount ]]; then
-    [[ -z $currency || $currency == INR ]] || die "the billing currency is $currency: pass budget=<amount in $currency> (₹700 is about 8 USD)"
-    amount=700
+    [[ -z $currency || $currency == INR ]] || die "the billing currency is $currency: pass budget=<amount in $currency> (₹500 is about 6 USD)"
+    amount=500
   fi
-  log "budget: $amount ${currency:-(billing currency)} a month, alerts at 50, 80 and 100 % (and 100 % forecast)"
+  log "budget: $amount ${currency:-(billing currency)} a month, alerts at 50, 80 and 100 % (and 100 % forecast). An alert, not a cap: Azure keeps billing past it"
   url="https://management.azure.com$SUB_SCOPE/providers/Microsoft.Consumption/budgets/$BUDGET_NAME?api-version=2023-05-01"
   existing=$(az rest --method get --url "$url" --only-show-errors --output json 2>/dev/null || echo null)
   jq -e . >/dev/null 2>&1 <<<"$existing" || existing=null # no budget yet, or not JSON: start fresh
@@ -473,9 +481,12 @@ ASKED=(
   'chitthi-r2-secret-access-key|R2 secret access key|^[0-9a-f]{64}$'
   'chitthi-hc-backup-url|healthchecks.io ping URL for the nightly backup|^https://hc-ping\.com/[A-Za-z0-9/_-]+$'
   'chitthi-hc-drill-url|healthchecks.io ping URL for the monthly restore drill|^https://hc-ping\.com/[A-Za-z0-9/_-]+$'
+  'chitthi-cloudflare-dns-token|Cloudflare API token (Zone Read + DNS Edit, zone dhruvgoyal.tech only)|^[A-Za-z0-9_-]{40,}$'
+  'chitthi-hc-api-key|healthchecks.io API key (read-write, the project with chitthi-backup)|^[A-Za-z0-9_-]{32,}$'
+  'chitthi-uptimerobot-api-key|UptimeRobot Main API key|^[A-Za-z0-9_-]{20,}$'
 )
 open_vault() { # waits for access; sets $have (stored names) and $tmp
-  local i
+  local i ops
   exists keyvault show -g "$APP_RG" -n "$KV" || die "Key Vault $KV doesn't exist yet: run setup.sh infra first"
   log "Key Vault $KV: waiting until you can manage secrets (a new role assignment takes a few minutes)"
   for i in $(seq 1 40); do
@@ -483,14 +494,18 @@ open_vault() { # waits for access; sets $have (stored names) and $tmp
     [[ $i -lt 40 ]] || die "you still can't list secrets in $KV; run 'setup.sh infra' first, or wait and retry"
     sleep 15
   done
+  exists keyvault show -g "$APP_RG" -n "$OPS_KV" || die "the ops vault $OPS_KV doesn't exist yet: run setup.sh infra first"
+  ops=$(v keyvault secret list --vault-name "$OPS_KV" --query '[].name') || die "you can't list secrets in $OPS_KV yet; wait and retry"
+  have+=$'\n'$ops
   tmp=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)
   # Expanded now: $tmp is the caller's local, gone by the time the trap runs.
   # shellcheck disable=SC2064
   trap "rm -rf -- '$tmp'" EXIT
 }
 has() { grep -qx "$1" <<<"$have"; }
+vault_of() { if [[ " ${OPS_SECRETS[*]} " == *" $1 "* ]]; then echo "$OPS_KV"; else echo "$KV"; fi; }
 store() { # <name> <file>: a new value (a new version, if the name exists)
-  q keyvault secret set --vault-name "$KV" --name "$1" --file "$2" --encoding utf-8
+  q keyvault secret set --vault-name "$(vault_of "$1")" --name "$1" --file "$2" --encoding utf-8
   rm -f "$2"
   log "stored $1"
 }
@@ -633,6 +648,11 @@ check() { # [infra|summary]: secrets not yet stored are reported as todo, not co
   # Key Vault and its secrets (names only)
   got=$(j keyvault show -g "$APP_RG" -n "$KV" --query "{rbac: properties.enableRbacAuthorization, purgeProtection: properties.enablePurgeProtection, softDelete: properties.enableSoftDelete}")
   expect "Key Vault: RBAC, soft delete, purge protection" "$got" '{"purgeProtection":true,"rbac":true,"softDelete":true}'
+  expect "ops vault $OPS_KV: RBAC (the VM holds no role on it: see its roles above)" "$(j keyvault show -g "$APP_RG" -n "$OPS_KV" --query properties.enableRbacAuthorization 2>/dev/null || echo missing)" true
+  names=$(v keyvault secret list --vault-name "$OPS_KV" --query '[].name' 2>/dev/null || true)
+  for name in "${OPS_SECRETS[@]}"; do
+    grep -qx "$name" <<<"$names" || echo "todo $name in $OPS_KV (setup.sh secrets): chitthi-up.sh and chitthi-down.sh need it"
+  done
   if names=$(v keyvault secret list --vault-name "$KV" --query '[].name' 2>/dev/null); then
     for name in "${SECRETS[@]}"; do
       if grep -qx "$name" <<<"$names"; then :

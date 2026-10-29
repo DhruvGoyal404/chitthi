@@ -118,7 +118,7 @@ FAKE_AZ = r"""#!/usr/bin/env bash
 state=${FAKE_AZ_STATE:?}
 { printf '%s\n' "$@"; echo ---; } >> "$state/args.log"
 case "$1 $2 ${3:-}" in
-  "vm show "*) echo malaysiawest ;;
+  "vm get-instance-view "*) printf 'malaysiawest\t%s\n' "${FAKE_AZ_POWER:-PowerState/running}" ;;
   "vm run-command create")
     shift 3
     script= penv=()
@@ -148,7 +148,7 @@ esac
 class RunOnVm(unittest.TestCase):
     TOKEN = "ghs_" + "A1b2" * 9
 
-    def run_on_vm(self, tmp, body, *args, token=None, leak=False):
+    def run_on_vm(self, tmp, body, *args, token=None, leak=False, power=None):
         with open(os.path.join(tmp, "az"), "w", newline="\n") as f:
             f.write(FAKE_AZ)
         os.chmod(os.path.join(tmp, "az"), 0o755)
@@ -160,6 +160,8 @@ class RunOnVm(unittest.TestCase):
             env["RUN_ON_VM_GITHUB_TOKEN"] = token
         if leak:
             env["FAKE_AZ_LEAK"] = "1"
+        if power:
+            env["FAKE_AZ_POWER"] = power
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-on-vm.sh")
         return subprocess.run([shutil.which("bash"), script, os.path.join(tmp, "s.sh"), *args], capture_output=True, text=True, env=env)
 
@@ -212,6 +214,14 @@ class RunOnVm(unittest.TestCase):
             self.assertEqual(r.returncode, 1)
             self.assertIn("came back from the API", r.stderr)
             self.assertNotIn(self.TOKEN, r.stdout + r.stderr)
+
+    def test_a_deallocated_vm_fails_fast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.run_on_vm(tmp, "echo should-not-run\n", "deploy", power="PowerState/deallocated")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("not running (PowerState/deallocated)", r.stderr)
+            self.assertIn("Run chitthi-up.sh first", r.stderr)
+            self.assertFalse(any(c[:3] == ["vm", "run-command", "create"] for c in self.calls(tmp)))
 
     def test_a_malformed_token_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,6 +340,88 @@ class SetupInfra(unittest.TestCase):
         alert = self.state_json()["res"]["activity-log"]["role-assignment-changed"]
         self.assertIn("status=Succeeded", alert["condition"])
         self.assertTrue(self.state_json()["res"]["activity-log"]["vm-resource-health"]["enabled"])
+
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+@unittest.skipUnless(shutil.which("jq"), "needs jq")
+class Audit(unittest.TestCase):
+    """audit.jq: what chitthi-down.sh calls still billing. A wrong "ok" costs real money."""
+
+    RG = "/subscriptions/s/resourceGroups/apps-host/providers/"
+
+    def audit(self, resources, disks=(), vms=None, sa=None, today="2027-03-01", mtd=None):
+        out = subprocess.run(
+            ["jq", "-n", "--argjson", "r", json.dumps(resources), "--argjson", "d", json.dumps(list(disks)),
+             "--argjson", "vms", json.dumps(vms or {}), "--argjson", "sa", json.dumps(sa or {}), "--argjson", "mtd", json.dumps(mtd or {}),
+             "--arg", "today", today, "--arg", "free_until", "2027-10-20", "-f", os.path.join(HERE, "audit.jq")],
+            capture_output=True, encoding="utf-8", check=True).stdout
+        report = json.loads(out)
+        return report, {r["name"]: r["status"] for r in report["rows"]}
+
+    def res(self, kind, name):
+        return {"id": f"{self.RG}{kind}/{name}", "name": name, "type": kind}
+
+    def test_the_host_when_down_is_clean(self):
+        vm, os_disk, data = self.res("Microsoft.Compute/virtualMachines", "apps-vm"), \
+            self.res("Microsoft.Compute/disks", "apps-vm-os"), self.res("Microsoft.Compute/disks", "apps-vm-data")
+        sa = self.res("Microsoft.Storage/storageAccounts", "chitthibkabc123")
+        free = [self.res(t, n) for t, n in [("Microsoft.Network/virtualNetworks", "apps-vnet"), ("Microsoft.Network/networkSecurityGroups", "nsg"),
+                                            ("Microsoft.Network/networkInterfaces", "nic"), ("microsoft.insights/metricalerts", "vm-low-memory"),
+                                            ("Microsoft.KeyVault/vaults", "kv"), ("Microsoft.ManagedIdentity/userAssignedIdentities", "chitthi-deploy")]]
+        disks = [{**d, "sku": {"name": "Premium_LRS"}, "properties": {"diskSizeGB": 64}} for d in (os_disk, data)]
+        report, status = self.audit([vm, os_disk, data, sa, *free], disks, {vm["id"].lower(): "PowerState/deallocated"},
+                                    {sa["id"].lower(): 5e9})
+        self.assertEqual(report["billing"], 0, report)
+        self.assertEqual(status["apps-vm"], "ok")
+        self.assertEqual(status["apps-vm-os"], "free")
+        self.assertEqual(status["chitthibkabc123"], "expected")
+        self.assertAlmostEqual(report["expected"], 8.64)
+        # After the free 12 months, the same disks bill: loudly.
+        report, status = self.audit([os_disk, data], disks, today="2027-10-20")
+        self.assertEqual((report["billing"], report["billing_monthly"]), (2, 1959.52))
+        # And before then, if Cost Management shows the allowance doesn't cover them.
+        report, status = self.audit([os_disk, data], disks, mtd={data["id"].lower(): 412.5})
+        self.assertEqual(status, {"apps-vm-os": "free", "apps-vm-data": "BILLING"})
+
+    def test_what_must_fail_the_audit(self):
+        vm, ip = self.res("Microsoft.Compute/virtualMachines", "apps-vm"), self.res("Microsoft.Network/publicIPAddresses", "apps-vm-ip")
+        std = self.res("Microsoft.Compute/disks", "std")
+        odd = self.res("Microsoft.Sql/servers", "something-new")
+        disks = [{**std, "sku": {"name": "StandardSSD_LRS"}, "properties": {"diskSizeGB": 64}}]
+        for power in ("PowerState/stopped", "PowerState/running", None):  # stopped still bills compute
+            report, status = self.audit([vm, ip, std, odd], disks, {vm["id"].lower(): power} if power else {})
+            self.assertEqual(status, {"apps-vm": "BILLING", "apps-vm-ip": "BILLING", "std": "BILLING", "something-new": "BILLING"})
+            self.assertEqual(report["billing"], 4)
+        row = next(r for r in report["rows"] if r["name"] == "something-new")
+        self.assertEqual(row["monthly"], "₹?")
+
+
+@unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "needs bash and jq")
+class ArmRetry(unittest.TestCase):
+    def run_arm(self, failures, message):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "az"), "w", newline="\n") as f:
+                f.write('#!/usr/bin/env bash\nn=$(cat "$FAKE/n" 2>/dev/null || echo 0); echo $((n + 1)) > "$FAKE/n"\n'
+                        f'if [ "$n" -lt {failures} ]; then echo "ERROR: {message}" >&2; exit 1; fi\necho \'{{"ok": true}}\'\n')
+            os.chmod(os.path.join(tmp, "az"), 0o755)
+            env = {**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"], "FAKE": tmp, "ARM_RETRY_SECONDS": "0"}
+            lib = os.path.join(HERE, "lib.sh").replace("\\", "/")
+            r = subprocess.run([shutil.which("bash"), "-c", f'source "{lib}"; arm get /x'], capture_output=True, text=True, env=env)
+            with open(os.path.join(tmp, "n"), encoding="utf-8") as f:
+                return r, int(f.read())
+
+    def test_transient_errors_are_retried(self):
+        for message in ("Service Unavailable({})", "Too Many Requests({})", "Conflict({\"error\":{\"code\":\"AnotherOperationInProgress\"}})"):
+            r, calls = self.run_arm(2, message)
+            self.assertEqual((r.returncode, calls), (0, 3), message + r.stderr)
+            self.assertIn('"ok": true', r.stdout)
+
+    def test_other_errors_fail_at_once(self):
+        r, calls = self.run_arm(5, "Bad Request({\"error\":{\"code\":\"InvalidParameter\"}})")
+        self.assertEqual((r.returncode, calls), (1, 1))
+        self.assertIn("InvalidParameter", r.stderr)
 
 
 def _has_yaml():

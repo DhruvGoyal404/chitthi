@@ -7,6 +7,7 @@
 #   backup.sh drill     monthly: restore the newest backup into a scratch database and verify it
 #   backup.sh selftest  once, at setup: prove the VM's own credentials can create but not
 #                       overwrite or delete
+#   backup.sh check     read-only (chitthi-up.sh): Key Vault, Azure Blob and R2 each answer
 #   backup.sh restore confirm=<host> [manifest=latest|manifests/<UTC>.json] [from=azure|r2]
 #                       replace the live database and missing media from a backup (incidents)
 #
@@ -485,10 +486,26 @@ run_restore() {
   log "restore complete: run 'deploy.sh smoke' to check the site"
 }
 
+# Read-only, for chitthi-up.sh: one real request to Key Vault and to each store, with the VM's own
+# credentials, and the newest backup in each.
+run_check() {
+  local last
+  secret chitthi-backup-age-recipient >/dev/null
+  echo "ok   Key Vault $VAULT: the VM's identity reads its secrets"
+  last=$(az_list manifests/ | sort | tail -n 1)
+  [[ -n $last ]] || die "Azure Blob: no manifest listed"
+  echo "ok   Azure Blob $AZ_ACCOUNT/$AZ_CONTAINER: newest $last"
+  r2_env
+  last=$(r2_list manifests/ | sort | tail -n 1)
+  [[ -n $last ]] || die "R2: no manifest listed"
+  echo "ok   R2 $R2_BUCKET: newest $last"
+}
+
 case ${1:-} in
   run) run_backup ;;
   drill) run_drill ;;
   selftest) run_selftest ;;
+  check) run_check ;;
   restore) shift; run_restore "$@" ;;
-  *) die "usage: backup.sh run | drill | selftest | restore confirm=$HOST [manifest=latest|manifests/<UTC>.json] [from=azure|r2]" ;;
+  *) die "usage: backup.sh run | drill | selftest | check | restore confirm=$HOST [manifest=latest|manifests/<UTC>.json] [from=azure|r2]" ;;
 esac

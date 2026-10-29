@@ -6,12 +6,16 @@ How the production deployment is built, run and repaired.
 - **Layout:** what runs where.
 - **Inventory and access.**
 - **Setting it up:** Azure setup, then host setup.
-- **Running it:** deploy and rollback; backups; alerts.
+- **Running it:** up and down; deploy and rollback; backups; alerts.
 - **Looking after it:** secret rotation; updates; disk growth; adding the second app.
 - **Incidents:** when something breaks.
 - **Reference:** pending dependency upgrades; the memory budget. The budget in money is under "What it costs".
 
-Every command here runs from Azure Cloud Shell, in a clone of this repo.
+Every command here runs from Azure Cloud Shell, in a clone of this repo. `chitthi-up.sh` and
+`chitthi-down.sh` also run from Git Bash on your own machine.
+
+**The site is not up all the time.** It runs only when needed (before an interview, say):
+`bash chitthi-up.sh` brings it up, `bash chitthi-down.sh` takes it down. See "Up and down".
 
 ## Layout
 
@@ -29,7 +33,7 @@ Every command here runs from Azure Cloud Shell, in a clone of this repo.
   - **api:** on 127.0.0.1:8082.
   - **web:** on 127.0.0.1:5175.
   - Data lives under `/data/chitthi` on the data disk.
-- **`deploy/azure`:** what you run from Azure Cloud Shell: `setup.sh` (the Azure resources), `run-on-vm.sh` (the host scripts, through Run Command) and `compact_media.py` (the monthly media compaction).
+- **`deploy/azure`:** what you run from Azure Cloud Shell: `setup.sh` (the Azure resources), `run-on-vm.sh` (the host scripts, through Run Command) and `compact_media.py` (the monthly media compaction). Also `host-up.sh`, `host-down.sh`, `lib.sh` and `audit.jq`, behind the repo root's `chitthi-up.sh` and `chitthi-down.sh` ("Up and down").
 - **Secrets:** each container reads only its own env file (`db.env`, `migrate.env`, `api.env`).
   - The API never sees the database owner's password.
   - The compose `.env` holds only image digests and paths, so `docker compose config` is safe to print.
@@ -47,12 +51,13 @@ Every command here runs from Azure Cloud Shell, in a clone of this repo.
 | What | Name | Where |
 |---|---|---|
 | VM | `apps-vm` (B2ats v2, Ubuntu 24.04) | Azure, resource group `apps-host`, Malaysia West |
-| Public IPv4 (static) | `apps-vm-ip` | `apps-host`. DNS: `chitthi.dhruvgoyal.tech` A record |
+| Public IPv4 (static) | `apps-vm-ip`, only while up: a new address every `chitthi-up.sh` | `apps-host`. DNS: `chitthi.dhruvgoyal.tech` A record (Cloudflare, DNS only), parked at 192.0.2.1 while down |
 | Data disk | `apps-vm-data` (64 GiB: P6 Premium SSD, or E6 Standard SSD with `disks=standard`; LUN 0; delete lock) → `/data` | `apps-host` |
 | Network security group | `apps-vm-nsg` (TCP 80 and 443 in) | `apps-host` |
 | Alerts and budget | `ops-email`, 3 metric alerts, 2 activity log alerts, budget `apps-host` | `apps-host` and the subscription |
 | Backup storage | `chitthibk<6 hex>`, container `backups` | Azure, resource group `chitthi` |
-| Secrets | Key Vault `chitthi-kv-<6 hex>` | `chitthi` |
+| Secrets | Key Vault `chitthi-kv-<6 hex>` (the app's; the VM reads it) | `chitthi` |
+| Operator tokens | Key Vault `chitthi-ops-<6 hex>`: Cloudflare DNS, healthchecks.io and UptimeRobot API keys, for `chitthi-up.sh` and `chitthi-down.sh`. The VM has no access | `chitthi` |
 | Deploy identity | `chitthi-deploy` (OIDC from GitHub `main`) | `chitthi` |
 | Second backup copy | R2 bucket (`R2_BUCKET`), 30-day bucket lock | Cloudflare |
 | Backup monitoring | `chitthi-backup` (also disk and certificate), `chitthi-drill` | healthchecks.io |
@@ -88,9 +93,10 @@ replaces a stored secret.
 | | Network | `apps-vm-nsg` allows TCP 80 and 443 from the Internet, nothing else. `apps-vm-ip` is a static Standard IPv4. No IPv6. |
 | | Disks | `disks=premium` (default): OS and data disk `apps-vm-data` are both 64 GiB Premium SSD (P6). `disks=standard`: a 32 GiB E4 OS disk and a 64 GiB E6 data disk (Standard SSD). See "What it costs". The data disk sits at LUN 0, with a delete lock. |
 | | Alerts | Action group `ops-email` sends to your address. Metric alerts: the VM unavailable, under 100 MiB available memory for 15 minutes, CPU credits under 30. Activity log alerts: the VM's resource health, and any role assignment written in the subscription. |
-| | Budget | `apps-host`, monthly, for the whole subscription. Default ₹700 (pass `budget=` if the billing currency isn't INR). Email at 50, 80 and 100 % actual, and at 100 % forecast. |
+| | Budget | `apps-host`, monthly, for the whole subscription. Default ₹500 (pass `budget=` if the billing currency isn't INR). Email at 50, 80 and 100 % actual, and at 100 % forecast. **An alert, not a cap:** Azure keeps billing past it. |
 | `chitthi` | Storage `chitthibk<6 hex>` | StorageV2 LRS, Hot tier (switched back from Cool on 2026-10-24: at a few GB the difference is a few rupees, and Hot has no early-deletion or retrieval charges). Entra sign-in only (shared keys off), no public blobs, TLS 1.2. Container `backups`. Lifecycle deletes `db/`, `manifests/` and `selftest/` 35 days after creation. Blob and container soft delete keep things 14 days. No versioning, no container WORM: append-only comes from the VM's role. Delete lock. |
 | | Key Vault `chitthi-kv-<6 hex>` | Standard, RBAC, purge protection, 90-day soft delete, delete lock. |
+| | Key Vault `chitthi-ops-<6 hex>` | Standard, RBAC, 7-day soft delete. Only you hold a role on it: a compromised VM can't read the Cloudflare token and repoint `dhruvgoyal.tech`. |
 | | Identity `chitthi-deploy` | What GitHub Actions signs in as (OIDC, no stored secret). It trusts only `repo:DhruvGoyal404@151380878/chitthi@1425788626:environment:production` (the immutable-ID form GitHub sends; `setup.sh` builds it from the GitHub API). |
 
 The `<6 hex>` suffix comes from the subscription id, so every run finds the same names.
@@ -102,7 +108,7 @@ The `<6 hex>` suffix comes from the subscription id, so every run finds the same
 | The VM | `Blob create-only writer` (custom: `blobs/read` and `blobs/add/action`, no `write` or `delete`) | the `backups` container |
 | The VM | Key Vault Secrets User | the vault |
 | `chitthi-deploy` | `VM Run Command operator` (custom: `virtualMachines/read` and managed Run Command's `runCommands/read`, `write` and `delete`; not the older `runCommand/action`) | the VM |
-| You | Key Vault Secrets Officer | the vault |
+| You | Key Vault Secrets Officer | both vaults |
 | You | Storage Blob Data Contributor, for the monthly compaction | the `backups` container |
 
 `setup.sh check` fails if any of these identities holds anything more.
@@ -195,6 +201,8 @@ of this repo, unless a step says GitHub, a browser or another service.
     - 2026-10-26: the zod upgrade. 2026-11-06: the body-parser upgrade ("Pending dependency upgrades").
     - Every month after the drill email: the media compaction ("Backups").
     - The first time Azure bills you: a look at Cost Management.
+    - A month before the free 12 months end (`host-down.sh audit` prints the date): the disk decision ("What it costs").
+31. **Up and down** (added 2026-10-30): `bash deploy/azure/setup.sh infra alert_email=<you@…>` once more (the ops vault, your role on it, the ₹500 budget), make the three tokens in "Up and down", store them with `bash deploy/azure/setup.sh secrets`, then run "Up and down, for real: the full cycle".
 
 That's go-live. From now on, every push to `main` that passes CI and changes more than docs waits for your approval, then deploys itself.
 
@@ -311,10 +319,18 @@ Monthly, at Azure's retail prices for `malaysiawest` in INR (Azure Retail Prices
 - They no longer mention the two free P6 disks, which older versions of the free-services list included.
 - Portal → "Free services" shows what this subscription actually gets. Check it before step 7.
 
-**Against the ₹700 budget and the ₹9,599 credit (valid until October 2027):**
-- **Case A fits:** about ₹359 a month, ₹4,300 over 12 months. Choose `disks=premium`.
-- **If the disks aren't free, choose `disks=standard`:** about ₹1,050 a month is **over ₹700**, and the credit lasts about 9 months.
-- **After the 12 free months, nothing fits ₹700:** the VM and the IPv4 address alone are about ₹1,100 a month, and with standard disks about ₹1,800. Before then, the budget, the VM size or the hosting needs another decision.
+These totals are for a site that never goes down. Since 2026-10-30 it runs only when needed
+("Up and down"), which removes the IPv4 and the VM's hours while it's down:
+
+| | During the free 12 months (case A) | After them (`disks=premium`) |
+|---|---|---|
+| **Per hour while up** | ₹0.48 (the IPv4; the VM's hours are free) | ₹1.51 (VM ₹1.03 + IPv4 ₹0.48), plus the disks below |
+| **Per month while down** | ≈ ₹9 (backup storage) | ≈ ₹1,969 (two P6 disks ₹1,960 + storage) |
+| **Per month if you forget `chitthi-down.sh`** | ≈ ₹359 | ≈ ₹3,069 |
+
+**Against the ₹500 budget (an alert, not a cap) and the ₹9,599 credit (valid until October 2027):**
+- **In the free 12 months:** down costs pennies, and even a forgotten month up (≈ ₹359) stays under ₹500.
+- **After them, the disks alone are ≈ ₹1,960 a month, up or down: four times the budget.** `chitthi-down.sh`'s audit starts reporting them as STILL BILLING on that date. Before it, decide: `disks=standard` (≈ ₹691 a month, still over ₹500), or snapshot the data disk and delete both disks on down (a few GB of snapshot costs a few rupees; up then rebuilds the VM, which these scripts don't do yet).
 
 Changing the disk type later means stopping the VM: `az vm deallocate`, `az disk update --sku …`, then start it again. A few minutes of downtime.
 
@@ -357,6 +373,70 @@ host set up this way.
 **When it fails,** the last lines name the check, for example
 `FAIL containers can't reach the metadata service`. Fix the cause and re-run it.
 `free -m` at the end is the real baseline for the memory budget's "OS" row.
+
+## Up and down
+
+The site runs only when it's needed. Two commands from the repo root, in Git Bash on Windows,
+Cloud Shell or Linux (each needs `az`, `jq` and `curl`, and signs you in if needed):
+
+```
+bash chitthi-up.sh      # fully down -> live, about 5-10 minutes
+bash chitthi-down.sh    # live -> nothing billing but the backups' pennies (and the disks after the free year)
+```
+
+Both are re-runnable after a half-failed run: every step checks before it creates or deletes. They
+pick, among the subscriptions you're signed in to (Azure for Students first), the one holding
+`apps-host`, and read its state from ARM (the CLI caches it). `up` refuses a subscription that isn't
+`Enabled`; `down` goes on, since it only stops things. Azure calls go through `az rest` and retry
+429, 5xx and "another operation in progress".
+
+**`chitthi-down.sh` [`--skip-backup`] [`--app-only`]:**
+1. **A final backup** on the VM (`backup.sh run`). If it fails, nothing is stopped. `--skip-backup` goes on without it, and whatever changed since the last nightly backup is then only on the data disk (which stays).
+2. **Monitors paused:** the healthchecks.io checks named `chitthi-*` and the UptimeRobot monitor for the domain, through their APIs. Otherwise they'd email "down" all the time.
+3. **DNS parked:** the A record now points at 192.0.2.1 (TEST-NET-1, routed nowhere). A record left on the released Azure address would follow it to whoever gets it next, and serve them `chitthi.dhruvgoyal.tech`.
+4. **The host,** through [`deploy/azure/host-down.sh`](../deploy/azure/host-down.sh):
+   - turns off the alerts that need a running VM: `vm-unavailable`, `vm-resource-health`, `vm-low-memory`, `vm-cpu-credits-low`. `role-assignment-changed` and the budget stay on;
+   - deallocates the VM (a merely "stopped" VM still bills its compute);
+   - detaches the static IPv4 from the NIC and deletes it;
+   - keeps the NIC, NSG, VNet, disks, both Key Vaults, the storage and the DNS record.
+5. **An audit** of every resource in the subscription, each with its idle cost. The P6 disks show as free until 12 months after the subscription's first resource, at the latest; Portal → Free services has the exact date. If Cost Management shows a "free" disk billing this month anyway, it counts as billing. Anything billing beyond the expected pennies prints **STILL BILLING** and exits non-zero. Read-only on its own: `bash deploy/azure/host-down.sh audit`.
+
+**`chitthi-up.sh` [`--app-only`]:**
+1. **The host,** through [`deploy/azure/host-up.sh`](../deploy/azure/host-up.sh): it tags the VM `app-chitthi`, creates a new static IPv4 (a new address every time), attaches it to the NIC, starts the VM, and turns the four alerts back on.
+2. **Cloudflare:** the A record goes to the new address, DNS only (grey cloud), TTL 60 s.
+3. **Waits** for `/api/health` on the new address (curl `--resolve`, so the certificate is checked against the name), then for 1.1.1.1 to answer the new address, then for the domain itself through this machine's DNS (it flushes the Windows DNS cache). It prints the certificate's days left; Caddy keeps its certificates on the data disk, so they survive.
+4. **Monitors resumed.** A resumed healthchecks.io check is "new" until the next nightly ping.
+5. **One real request to each outside dependency:** Google's and GitHub's authorize pages for our client and callback, Let's Encrypt's directory, and `backup.sh check` on the VM (Key Vault, Azure Blob and R2, with the VM's own identity; it lists the newest backup in each).
+6. **A box** with the URL, the fallback, the cost per hour, and "run chitthi-down.sh when done". The fallback is a hosts-file line, `<ip> chitthi.dhruvgoyal.tech`: `https://<ip>` itself doesn't work, because the certificate is for the name and OAuth only accepts the name.
+
+**The tokens they use** live in the ops vault `chitthi-ops-<6 hex>`, which the VM can't read. Store them with `bash deploy/azure/setup.sh secrets` (it asks for each missing one, hidden):
+
+| Secret | Where to make it | Exactly what it may do |
+|---|---|---|
+| `chitthi-cloudflare-dns-token` | Cloudflare → My Profile → API Tokens → Create Token → Custom token | Permissions: **Zone → Zone → Read** and **Zone → DNS → Edit**. Zone Resources: **Include → Specific zone → dhruvgoyal.tech**. No account permissions. Optionally an IP filter and an expiry date. |
+| `chitthi-hc-api-key` | healthchecks.io → the project with `chitthi-backup` → Settings → API Access | The **read-write** key (pause and resume need it). It reaches that project only. |
+| `chitthi-uptimerobot-api-key` | UptimeRobot → Integrations & API → API | The **Main API key** (a monitor-specific key can only read). |
+
+**What it costs:** see "What it costs". The Deploy workflow fails at once on a down site, with
+"run chitthi-up.sh first": `run-on-vm.sh` checks the VM's power state before anything else.
+Bring the site up, then re-run the deploy (Actions → Deploy → Re-run, or Run workflow).
+`setup.sh check` expects a running VM and its IPv4, so run it while up; `setup.sh infra` while
+down would recreate the IPv4 and turn the alerts back on.
+
+**Two apps on one VM.** The VM is shared, so taking it down takes every app on it down.
+- Each app's up script tags the VM `app-<name>`. `host-down.sh` refuses while another app's tag is there, unless `also=<name>` says you mean it.
+- With Hisaab there: run `bash hisaab-down.sh --app-only` (its backup, monitors and DNS), then `bash chitthi-down.sh`, which asks you to re-run `host-down.sh app=chitthi also=hisaab`.
+- Coming back: `bash chitthi-up.sh`, then `bash hisaab-up.sh --app-only`. Hisaab's DNS must follow the new address too.
+- Hisaab's scripts are its own thin wrappers over `deploy/azure/lib.sh`, `host-up.sh` and `host-down.sh`, copied into its repo: `hc_set`, `uptimerobot_set` and `cf_set_a` take the check prefix, the domain and the secret names as arguments.
+
+### Up and down, for real: the full cycle
+
+Run this once after any change to these scripts, and before relying on them:
+
+1. `bash chitthi-up.sh`. Expect the box, and exit code 0 (`echo $?`).
+2. In a browser, sign in at https://chitthi.dhruvgoyal.tech and send a message. Reload: it's still there.
+3. `bash chitthi-down.sh`. Expect "audit clean" and exit code 0. Then `curl -m 10 https://chitthi.dhruvgoyal.tech/api/health` fails, and healthchecks.io and UptimeRobot show the checks paused.
+4. `bash chitthi-up.sh` again. The message from step 2 is still there, and so is the session (the database and cookies don't care about the address).
 
 ## Deploy and rollback
 
@@ -610,6 +690,9 @@ The Azure REST calls and R2 permissions themselves are proven on the VM by `back
 ## Alerts
 
 Everything below emails you. Each row says what it means and where to start; "Incidents" has the steps.
+While the site is down by design, `chitthi-down.sh` has turned off the four `vm-*` alerts and
+paused healthchecks.io and UptimeRobot; `chitthi-up.sh` turns them back on ("Up and down").
+`role-assignment-changed` and the budget never pause.
 
 | Alert | From | Means | First move |
 |---|---|---|---|
@@ -761,7 +844,7 @@ At worst you lose everything since last night's backup (02:00 IST).
   3. Check the ruleset on `main`, then the federated credential (`setup.sh check`).
   4. Every deploy needs your approval, so an attacker with a stolen session could approve one. Revoke first.
 
-**Over budget:** Cost Management shows which resource. `az vm deallocate -g apps-host -n apps-vm` stops the VM's compute charges, and the site goes down.
+**Over budget:** Cost Management shows which resource. `bash chitthi-down.sh` stops everything that bills while idle and ends with an audit naming whatever still does.
 
 ### Incident log
 

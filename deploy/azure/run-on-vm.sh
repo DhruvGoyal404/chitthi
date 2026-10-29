@@ -24,7 +24,16 @@
 # they hold only characters no shell treats specially. (Named `--parameters` would become
 # environment variables, and these scripts take key=value arguments.)
 # Output is the last 4 KB, so the scripts put what matters (failures, verification) last.
+# A VM that isn't running fails at once with "run chitthi-up.sh first" (the site is down by
+# design between uses, docs/MAINTENANCE.md "Up and down"); Run Command would otherwise wait on it.
 set -euo pipefail
+# Git Bash on Windows (chitthi-down.sh): az and jq are Windows programs. They print CRLF and can't
+# open MSYS paths such as /tmp/..., so their output loses the CR and the payload goes by its
+# Windows path. Both are no-ops on Linux.
+export MSYS_NO_PATHCONV=1
+az() { command az "$@" | tr -d '\r'; }
+jq() { command jq "$@" | tr -d '\r'; }
+winpath() { if command -v cygpath >/dev/null; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
 
 VM_RG=${VM_RG:-apps-host}
 VM_NAME=${VM_NAME:-apps-vm}
@@ -39,6 +48,17 @@ done
 token=${RUN_ON_VM_GITHUB_TOKEN:-}
 unset RUN_ON_VM_GITHUB_TOKEN
 [[ -z $token || $token =~ ^[A-Za-z0-9_.-]{20,}$ ]] || die "RUN_ON_VM_GITHUB_TOKEN doesn't look like a GitHub token"
+
+# The VM's power state and location, from the VM read the deploy identity's role allows
+# (get-instance-view is a GET with $expand=instanceView: no other permission).
+location='' power=''
+read -r location power < <(az vm get-instance-view --resource-group "$VM_RG" --name "$VM_NAME" --only-show-errors --output tsv \
+  --query "[location, instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]]" | tr '\n' ' ') || true
+if [[ $power != PowerState/running ]]; then
+  msg="$VM_RG/$VM_NAME is not running (${power:-power state unreadable}): the site is down. Run chitthi-up.sh first, then retry"
+  [[ -n ${GITHUB_ACTIONS:-} ]] && echo "::error::$msg"
+  die "$msg"
+fi
 
 delim=END_OF_SCRIPT_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 grep -qF "$delim" "$script" && die "the script contains the wrapper's delimiter"
@@ -73,10 +93,9 @@ if [[ -n $token ]] && grep -qF -- "$token" "$payload"; then die "the token is in
 
 protected=()
 [[ -n $token ]] && protected=(--protected-parameters "CHITTHI_GITHUB_TOKEN=$token")
-location=$(az vm show --resource-group "$VM_RG" --name "$VM_NAME" --query location --only-show-errors --output tsv)
 echo "run-on-vm: $script $* on $VM_RG/$VM_NAME (run command $name)" >&2
 az vm run-command create --resource-group "$VM_RG" --vm-name "$VM_NAME" --name "$name" --location "$location" \
-  --script @"$payload" "${protected[@]}" --async-execution false --timeout-in-seconds 3600 \
+  --script @"$(winpath "$payload")" "${protected[@]}" --async-execution false --timeout-in-seconds 3600 \
   --only-show-errors --output none || echo "run-on-vm: the run command did not complete cleanly" >&2
 unset protected
 
