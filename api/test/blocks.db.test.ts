@@ -34,7 +34,7 @@ describe.skipIf(!apiUrl)('blocking: REST paths', () => {
     expect((await as(app, a).put(`/blocks/${b.id}`)).status).toBe(201);
     expect((await as(app, a).put(`/blocks/${b.id}`)).status).toBe(200);
     const list = await as(app, a).get('/blocks');
-    expect(list.body.blocked).toEqual([{ userId: b.id, handle: b.handle, displayName: b.handle, blockedAt: expect.any(String) }]);
+    expect(list.body.blocked).toEqual([{ userId: b.id, handle: b.handle, displayName: b.handle, avatarUrl: null, blockedAt: expect.any(String) }]);
     expect((await as(app, b).get('/blocks')).body.blocked).toEqual([]); // a block is the blocker's own list
     expect((await as(app, a).put(`/blocks/${a.id}`)).status).toBe(400);
     expect((await as(app, a).put(`/blocks/${randomUUID()}`)).status).toBe(404);
