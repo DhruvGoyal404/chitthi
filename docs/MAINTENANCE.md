@@ -497,7 +497,7 @@ byte-identical to before, and the other site must still answer.
 |---|---|---|
 | `chitthi-backup.timer` → `backup.sh run` | nightly, 20:30 UTC (02:00 IST), before the reboot window | Database dump, new media, manifest; to Azure Blob, then to R2 |
 | `chitthi-restore-drill.timer` → `backup.sh drill` | the 1st of each month, 23:00 UTC | Restores the newest backup into a scratch database and verifies it |
-| `backup.sh selftest` | once at setup: `run-on-vm.sh deploy/host/backup.sh selftest` | Proves the VM's real credentials can create but not overwrite or delete |
+| `backup.sh selftest` | once at setup: `run-on-vm.sh deploy/host/backup.sh selftest` | Proves, with the VM's real credentials, that each store accepts a new object on the first attempt and refuses a second create, an overwrite and a delete, then reads the probe back to prove it is unchanged |
 | `backup.sh restore confirm=chitthi.dhruvgoyal.tech [manifest=…] [from=azure\|r2]` | in an incident ("Incidents") | Replaces the live database with a backup's, and brings back any media the disk lacks. Details below. |
 
 Both timer services are capped at 256 MB and run at idle CPU and I/O priority.
@@ -506,8 +506,14 @@ Both timer services are capped at 256 MB and run at idle CPU and I/O priority.
 - **Azure:** the VM's identity has a custom role with only `blobs/read` and `blobs/add/action`,
   scoped to the backup container. Every upload is a single Put Blob with `If-None-Match: *`.
   (Put Block needs `write`, which the role doesn't have.)
-- **R2:** objects are copied with `rclone copy --immutable`, or streamed for media the bucket
-  doesn't have yet. The bucket lock refuses overwrites and deletes for 30 days.
+  - **A second create of an existing blob comes back 403, not 409** (seen on the VM, 2026-10-25). Azure checks authorization first: replacing a blob needs `write`, which the role lacks, so the request is refused before the `If-None-Match` condition is evaluated. The selftest accepts 403 or 409. The nightly media upload treats a 403 as "already there" only after a HEAD confirms the blob exists.
+- **R2:** one `PutObject` per object over R2's S3 API, sent by curl, with `If-None-Match: *` so an
+  existing key is never overwritten. The bucket lock refuses overwrites and deletes for 30 days.
+  - **Exactly what is sent** (`backup.sh`, `r2_*`): `curl -sS --max-time 600 -K <0600 config> -X PUT -T <file> -H "x-amz-content-sha256: <the file's sha256>" -H "If-None-Match: *" <endpoint>/<bucket>/<key>`. The config file holds `user = "<access key id>:<secret>"` and `aws-sigv4 = "aws:amz:auto:s3"`, so the keys never appear on a command line.
+  - **Nothing is streamed and nothing is multipart.** Media is encrypted to a file first, so every object goes up in one request of known length. Listing is `GET ?list-type=2&prefix=…` (ListObjectsV2, following continuation tokens), and the drill and restore read with a plain signed `GET`.
+  - **The signing is checked against our own SigV4 signer:** the one in `compact_media.py`, tested against AWS's published vector. On 2026-10-29 curl's PUT (with `If-None-Match` and the payload hash), its list (with an encoded continuation token) and its DELETE all verified.
+  - **Version:** curl 8.5.0, as Ubuntu 24.04 ships it, with `--aws-sigv4`.
+  - **Why not rclone any more** (rclone 1.60.1 from Ubuntu 24.04, `provider = Cloudflare`, `no_check_bucket = true`, `copy --immutable --no-traverse` and `rcat`): on 2026-10-25 R2 answered `501 NotImplemented`. `rcat` streams input of unknown length as a multipart upload (POST CreateMultipartUpload), and it failed on every attempt; `copy` failed its first attempt and succeeded on a retry. A single PutObject of known length is the most basic request R2 supports, and it removes rclone from the host.
   - **The limit of that:** R2 has no create-only token, and the VM's token is "Object Read & Write". Once an object's 30-day lock ends, a compromised VM could delete or overwrite it on R2.
   - Dumps and manifests expire at 35 days anyway. Media older than 30 days is safe in Azure, where the VM can't delete. The drill reads media from Azure.
 - **Not restic.** restic must delete its own lock files, and `--no-lock` isn't supported for
@@ -768,6 +774,14 @@ At worst you lose everything since last night's backup (02:00 IST).
   - The federated credential, the alerts (the same go-live had stopped on "activity log alert vm-resource-health already exists"), the NSG rules and the locks are all create-or-update now, so an `infra` re-run can't revert the fix or fail on what exists.
 - **Tested:** CI runs `setup.sh infra` twice against a stand-in `az` (`deploy/azure/fake_az.py`). The stand-in refuses `create` on anything that exists, and evaluates `setup.sh`'s real queries with jmespath. The tests also prove that the old subject fails `check` and that a re-run repairs it, and that alerts left by an earlier run are updated.
 - **Still unproven by CI:** that GitHub keeps this format. Only a real deploy proves the subject; the incident playbook covers that ("The deploy can't sign in to Azure").
+
+**2026-10-25: the first real backup selftest and run.**
+- **Azure: a false FAIL.** A second create was refused with 403, where the selftest expected 409. Both are refusals: authorization comes before the `If-None-Match` check (see "Append-only by design"). Fixed in the selftest, and the nightly media upload now handles the same 403.
+- **R2: a real failure.** Every streamed `rclone rcat` got `501 NotImplemented`, and `rclone copy` needed a retry. That night's dump and manifest reached R2 on the retry; its two media files didn't.
+  - The selftest's "overwrite refused" and "delete refused" lines proved nothing, because the overwrite failed with the same 501.
+  - R2 now gets one curl `PutObject` per object. The selftest reads its probe back after each refused attempt, so a refusal is proven by the content, not the status code.
+  - healthchecks.io turned `chitthi-backup` red that night, as designed.
+- **Recovery:** the next run fills the missing R2 media by itself (it uploads what R2's listing lacks). Nothing on R2 needs deleting, and the 30-day lock wouldn't allow it.
 
 ## Pending dependency upgrades
 

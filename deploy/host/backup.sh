@@ -13,7 +13,8 @@
 # Every object is new and uniquely named, and nothing is ever overwritten or deleted from here:
 # - Azure: the VM's identity holds only blobs/read and blobs/add/action (create-only). Each upload
 #   is a single Put Blob with If-None-Match: *.
-# - R2: `rclone copy --immutable`, and the bucket lock refuses overwrites and deletes for 30 days.
+# - R2: one PutObject per object with If-None-Match: * (curl, SigV4), and the bucket lock refuses
+#   overwrites and deletes for 30 days.
 # Retention is the storage's job: lifecycle rules delete db/, manifests/ and selftest/ after 35
 # days. Media is pruned only by the monthly compaction the owner runs by hand
 # (docs/MAINTENANCE.md, "Backups").
@@ -145,16 +146,68 @@ az_delete() { # <name>: prints the HTTP status (selftest only: it must be refuse
   az_auth
   curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -X DELETE -H @"$work/az-auth" -H "x-ms-version: $AZ_VERSION" "$(az_url "$1")"
 }
+az_exists() { # <name>: true if the blob is there (blobs/read is in the role)
+  if [[ -n $TEST ]]; then [[ -e $TEST/azure/$1 ]]; return; fi
+  az_auth
+  [[ $(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -I -H @"$work/az-auth" -H "x-ms-version: $AZ_VERSION" "$(az_url "$1")") == 200 ]]
+}
 
-# --- R2 through rclone, configured from the environment only (no config file on disk).
+# --- R2 over its S3 API with curl (not rclone: rclone's streamed multipart uploads got 501
+# NotImplemented from R2, docs/MAINTENANCE.md). One PutObject per object, from a file: its length
+# is known, so no multipart and no streaming, and its sha256 is the signed payload hash.
+# If-None-Match: * never overwrites a key that exists. Signed by curl (--aws-sigv4); the keys sit
+# in a 0600 curl config file under $work, never on a command line.
+R2_EMPTY_SHA=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 # sha256 of no body
 r2_env() {
-  if [[ -n $TEST ]]; then R2="$TEST/r2"; mkdir -p "$R2"; return; fi
-  export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
-  RCLONE_CONFIG_R2_ENDPOINT=$(secret chitthi-r2-endpoint)
-  RCLONE_CONFIG_R2_ACCESS_KEY_ID=$(secret chitthi-r2-access-key-id)
-  RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=$(secret chitthi-r2-secret-access-key)
-  export RCLONE_CONFIG_R2_ENDPOINT RCLONE_CONFIG_R2_ACCESS_KEY_ID RCLONE_CONFIG_R2_SECRET_ACCESS_KEY
-  R2="r2:$R2_BUCKET"
+  if [[ -n $TEST ]]; then R2_DIR="$TEST/r2"; mkdir -p "$R2_DIR"; return; fi
+  [[ -f $work/r2.curl ]] && return
+  local endpoint key secret_key
+  endpoint=$(secret chitthi-r2-endpoint)
+  key=$(secret chitthi-r2-access-key-id)
+  secret_key=$(secret chitthi-r2-secret-access-key)
+  R2_BASE="${endpoint%/}/$R2_BUCKET"
+  printf 'user = "%s:%s"\naws-sigv4 = "aws:amz:auto:s3"\n' "$key" "$secret_key" > "$work/r2.curl"
+}
+r2_curl() { curl -sS --max-time 600 -K "$work/r2.curl" "$@"; }
+r2_put() { # <file> <key> [overwrite]: prints the HTTP status (200 created; 412 exists; 403 locked)
+  if [[ -n $TEST ]]; then
+    local dst=$R2_DIR/$2
+    if [[ -e $dst ]]; then echo 412; return; fi
+    mkdir -p "$(dirname "$dst")" && cp "$1" "$dst" && echo 200
+    return
+  fi
+  local cond=(-H 'If-None-Match: *')
+  [[ ${3:-} == overwrite ]] && cond=()
+  r2_curl -o /dev/null -w '%{http_code}' -X PUT -T "$1" -H "x-amz-content-sha256: $(sha256sum "$1" | cut -d' ' -f1)" \
+    "${cond[@]}" "$R2_BASE/$2"
+}
+r2_put_new() { # <file> <key>: must be created now
+  local code
+  code=$(r2_put "$1" "$2")
+  [[ $code == 200 ]] || die "R2 upload of $2 got HTTP $code"
+}
+r2_get() { # <key> <file>
+  if [[ -n $TEST ]]; then cp "$R2_DIR/$1" "$2"; return; fi
+  r2_curl -f -o "$2" -H "x-amz-content-sha256: $R2_EMPTY_SHA" "$R2_BASE/$1"
+}
+r2_list() { # <prefix>: keys, one per line (ListObjectsV2, every page)
+  if [[ -n $TEST ]]; then
+    [[ -d $R2_DIR/$1 ]] || return 0
+    (cd "$R2_DIR" && find "$1" -type f | sort)
+    return
+  fi
+  local token='' page
+  while :; do
+    page=$(r2_curl -f -H "x-amz-content-sha256: $R2_EMPTY_SHA" \
+      "$R2_BASE?list-type=2&prefix=$1${token:+&continuation-token=$(jq -rn --arg t "$token" '$t|@uri')}")
+    grep -o '<Key>[^<]*</Key>' <<<"$page" | sed -e 's/<Key>//' -e 's#</Key>##' || true
+    grep -q '<IsTruncated>true</IsTruncated>' <<<"$page" || break
+    token=$(grep -o '<NextContinuationToken>[^<]*</NextContinuationToken>' <<<"$page" | sed -e 's/<[^>]*>//g')
+    [[ -n $token ]] || break
+  done
+}
+r2_delete() { # <key>: prints the HTTP status (selftest only: it must be refused)
+  r2_curl -o /dev/null -w '%{http_code}' -X DELETE -H "x-amz-content-sha256: $R2_EMPTY_SHA" "$R2_BASE/$1"
 }
 
 # --- healthchecks.io: start, success, failure (with a one-line reason, never a secret).
@@ -202,6 +255,10 @@ run_backup() {
     [[ -n $k ]] || continue
     age -r "$recipient" < "$(media_path "$k")" > "$work/m.age"
     code=$(az_put "$work/m.age" "media/$k.age")
+    # Already there (listed late): 409 from If-None-Match, or 403, because the create-only role
+    # fails the overwrite authorization before the condition is looked at. Only a 403 for a blob
+    # that really exists counts.
+    if [[ $code == 403 ]] && az_exists "media/$k.age"; then code=409; fi
     [[ $code == 201 || $code == 409 ]] || die "upload of media/$k.age got HTTP $code"
     missing=$((missing + 1))
   done < <(comm -23 <(echo "$keys") <(echo "$existing"))
@@ -216,17 +273,23 @@ run_backup() {
       media: ($keys | split("\n") | map(select(length > 0)))}' > "$STAGE/manifests/$ts.json"
   az_put_new "$STAGE/manifests/$ts.json" "manifests/$ts.json"
 
-  # The R2 copy: the same dump and manifest, and every media file R2 doesn't have yet.
+  # The R2 copy, in the same order: the dump, every media file R2 doesn't have yet (encrypted to
+  # a file first, never streamed), then the manifest.
   r2_env
-  rclone copy --immutable --no-traverse "$STAGE" "$R2"
-  existing=$(rclone lsf --files-only "$R2/media" 2>/dev/null | sed -n 's#^\([0-9a-f]\{32\}\)\.age$#\1#p' | sort || true)
+  r2_put_new "$STAGE/$name" "$name"
+  r2_put_new "$STAGE/$name.sha256" "$name.sha256"
+  existing=$(r2_list media/ | sed -n 's#^media/\([0-9a-f]\{32\}\)\.age$#\1#p' | sort)
   missing=0
   while read -r k; do
     [[ -n $k ]] || continue
-    age -r "$recipient" < "$(media_path "$k")" | rclone rcat "$R2/media/$k.age"
+    age -r "$recipient" < "$(media_path "$k")" > "$work/m.age"
+    code=$(r2_put "$work/m.age" "media/$k.age")
+    [[ $code == 200 || $code == 412 ]] || die "R2 upload of media/$k.age got HTTP $code" # 412: listed late, already there
     missing=$((missing + 1))
   done < <(comm -23 <(echo "$keys") <(echo "$existing"))
-  log "R2: dump and manifest copied, $missing new media"
+  rm -f "$work/m.age"
+  r2_put_new "$STAGE/manifests/$ts.json" "manifests/$ts.json"
+  log "R2: dump, manifest and $missing new media"
 
   echo "$ts" > "$STATE/last-success"
   rm -rf "$STAGE"
@@ -301,7 +364,8 @@ run_drill() {
 
   # The R2 copy holds the same dump, byte for byte.
   r2_env
-  got=$(rclone cat "$R2/$dump" | sha256sum | cut -d' ' -f1)
+  r2_get "$dump" "$work/r2-dump.age" || die "R2 has no copy of $dump"
+  got=$(sha256sum "$work/r2-dump.age" | cut -d' ' -f1)
   [[ $got == "$sha" ]] || die "R2's copy of the dump differs"
   log "R2: the same dump, checksum verified"
 
@@ -317,15 +381,28 @@ run_selftest() {
   local probe code fails=0
   probe=selftest/$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 4)
   echo "selftest $(date -u +%FT%TZ)" > "$work/probe"
-  expect() { if [[ $2 == "$3" ]]; then echo "ok   $1 ($2)"; else echo "FAIL $1: got $2, expected $3"; fails=$((fails + 1)); fi; }
-  code=$(az_put "$work/probe" "$probe");           expect "Azure: create a new blob" "$code" 201
-  code=$(az_put "$work/probe" "$probe");           expect "Azure: create again (If-None-Match) is refused" "$code" 409
-  code=$(az_put "$work/probe" "$probe" overwrite); expect "Azure: overwrite is not permitted" "$code" 403
-  code=$(az_delete "$probe");                      expect "Azure: delete is not permitted" "$code" 403
+  echo "changed" > "$work/changed"
+  # <what> <HTTP status> <allowed statuses, as an extended regex>
+  expect() { if [[ $2 =~ ^($3)$ ]]; then echo "ok   $1 ($2)"; else echo "FAIL $1: got $2, expected $3"; fails=$((fails + 1)); fi; }
+  # The proof that matters, whatever status a refusal came back with: the probe is still there, unchanged.
+  intact() { # <store> <fetch function>
+    if "$2" "$probe" "$work/back" 2>/dev/null && cmp -s "$work/back" "$work/probe"; then echo "ok   $1: after those attempts the probe is still there, unchanged"
+    else echo "FAIL $1: the probe was changed or removed"; fails=$((fails + 1)); fi
+  }
+  code=$(az_put "$work/probe" "$probe");             expect "Azure: create a new blob" "$code" 201
+  # 409 from If-None-Match, or 403: the create-only role fails an existing blob's overwrite
+  # authorization before the condition is evaluated (seen on the VM). Both are a refusal.
+  code=$(az_put "$work/probe" "$probe");             expect "Azure: create again is refused" "$code" '403|409'
+  code=$(az_put "$work/changed" "$probe" overwrite); expect "Azure: overwrite is refused" "$code" 403
+  code=$(az_delete "$probe");                        expect "Azure: delete is refused" "$code" 403
+  intact Azure az_get
   r2_env
-  if rclone rcat "$R2/$probe" < "$work/probe"; then echo "ok   R2: create a new object"; else echo "FAIL R2: create"; fails=$((fails + 1)); fi
-  if echo changed | rclone rcat "$R2/$probe" 2>/dev/null; then echo "FAIL R2: an overwrite succeeded (is the bucket lock on?)"; fails=$((fails + 1)); else echo "ok   R2: overwrite refused"; fi
-  if rclone deletefile "$R2/$probe" 2>/dev/null; then echo "FAIL R2: a delete succeeded (is the bucket lock on?)"; fails=$((fails + 1)); else echo "ok   R2: delete refused"; fi
+  code=$(r2_put "$work/probe" "$probe");             expect "R2: create a new object, one PutObject, first attempt" "$code" 200
+  code=$(r2_put "$work/probe" "$probe");             expect "R2: create again is refused (If-None-Match)" "$code" 412
+  # Without the condition, only the bucket lock stands in the way: any refusal, then the read-back.
+  code=$(r2_put "$work/changed" "$probe" overwrite); expect "R2: overwrite is refused (bucket lock)" "$code" '[34][0-9][0-9]|501'
+  code=$(r2_delete "$probe");                        expect "R2: delete is refused (bucket lock)" "$code" '[34][0-9][0-9]|501'
+  intact R2 r2_get
   [[ $fails -eq 0 ]] || die "$fails selftest check(s) failed: fix the permissions before relying on these backups"
   log "selftest passed: the VM can create, and cannot overwrite or delete, in both stores"
 }
@@ -346,10 +423,10 @@ run_restore() {
   [[ $confirm == "$HOST" ]] || die "this replaces the live database and its files: pass confirm=$HOST"
   [[ $from == azure || $from == r2 ]] || die "from= must be azure or r2"
   if [[ $from == r2 ]]; then r2_env; fi
-  fetch() { if [[ $from == azure ]]; then az_get "$1" "$2"; else rclone copyto "$R2/$1" "$2"; fi; }
+  fetch() { if [[ $from == azure ]]; then az_get "$1" "$2"; else r2_get "$1" "$2"; fi; }
   if [[ $manifest == latest ]]; then
     if [[ $from == azure ]]; then manifest=$(az_list manifests/ | sort | tail -n 1)
-    else manifest=manifests/$(rclone lsf --files-only "$R2/manifests" | sort | tail -n 1); fi
+    else manifest=$(r2_list manifests/ | sort | tail -n 1); fi
   fi
   [[ $manifest =~ ^manifests/[0-9]{8}T[0-9]{6}Z\.json$ ]] || die "manifest= must be manifests/<UTC>.json or latest (got '$manifest')"
 
