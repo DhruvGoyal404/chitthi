@@ -59,7 +59,7 @@ done
 [[ $got == "$ip" ]] || die "1.1.1.1 still answers '${got:-nothing}' for $DOMAIN after 5 minutes"
 log "1.1.1.1: $got"
 # This machine's own resolver may still hold the parked address for up to its TTL.
-command -v ipconfig >/dev/null && ipconfig /flushdns >/dev/null 2>&1 || true
+if command -v ipconfig >/dev/null; then ipconfig /flushdns >/dev/null 2>&1 || true; fi
 
 step "The domain itself, through real DNS, with a trusted certificate"
 for _ in $(seq 1 36); do

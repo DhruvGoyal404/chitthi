@@ -486,7 +486,7 @@ ASKED=(
   'chitthi-uptimerobot-api-key|UptimeRobot Main API key|^[A-Za-z0-9_-]{20,}$'
 )
 open_vault() { # waits for access; sets $have (stored names) and $tmp
-  local i ops
+  local i ops_names
   exists keyvault show -g "$APP_RG" -n "$KV" || die "Key Vault $KV doesn't exist yet: run setup.sh infra first"
   log "Key Vault $KV: waiting until you can manage secrets (a new role assignment takes a few minutes)"
   for i in $(seq 1 40); do
@@ -495,8 +495,8 @@ open_vault() { # waits for access; sets $have (stored names) and $tmp
     sleep 15
   done
   exists keyvault show -g "$APP_RG" -n "$OPS_KV" || die "the ops vault $OPS_KV doesn't exist yet: run setup.sh infra first"
-  ops=$(v keyvault secret list --vault-name "$OPS_KV" --query '[].name') || die "you can't list secrets in $OPS_KV yet; wait and retry"
-  have+=$'\n'$ops
+  ops_names=$(v keyvault secret list --vault-name "$OPS_KV" --query '[].name') || die "you can't list secrets in $OPS_KV yet; wait and retry"
+  have+=$'\n'$ops_names
   tmp=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)
   # Expanded now: $tmp is the caller's local, gone by the time the trap runs.
   # shellcheck disable=SC2064

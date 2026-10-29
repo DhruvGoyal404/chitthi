@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared by host-up.sh, host-down.sh and each app's <app>-up.sh / <app>-down.sh. Sourced, not run.
 # Works in Git Bash on Windows, Azure Cloud Shell and Linux (docs/MAINTENANCE.md, "Up and down").
 #
