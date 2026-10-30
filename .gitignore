@@ -17,6 +17,10 @@ coverage/
 uploads/
 .data/
 
+# Python bytecode (the deploy/azure tests)
+__pycache__/
+*.pyc
+
 # logs and OS cruft
 *.log
 logs/

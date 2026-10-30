@@ -64,7 +64,8 @@ arm_maybe() { # <path>: GET; prints nothing (and succeeds) when the resource doe
 # <require-enabled|allow-disabled>: down still runs on a subscription that isn't Enabled.
 preflight() {
   local c s state
-  for c in az jq curl; do command -v "$c" >/dev/null || die "'$c' is not installed"; done
+  # type -P: the programs on PATH. az and jq are also the functions above, which command -v finds.
+  for c in az jq curl; do type -P "$c" >/dev/null || die "'$c' is not installed"; done
   if [[ -n ${PREFLIGHT_SUB:-} ]]; then # host-up/down.sh under an app script that already did all this
     SUB=$PREFLIGHT_SUB
   else
