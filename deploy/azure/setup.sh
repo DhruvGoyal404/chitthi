@@ -631,8 +631,9 @@ check() { # [infra|summary]: secrets not yet stored are reported as todo, not co
   expect "role '$RUNCMD_ROLE' grants Run Command only" "$got" \
     '{"actions":["Microsoft.Compute/virtualMachines/read","Microsoft.Compute/virtualMachines/runCommands/delete","Microsoft.Compute/virtualMachines/runCommands/read","Microsoft.Compute/virtualMachines/runCommands/write"],"data":[]}'
   vm_pid=$(v vm show -g "$HOST_RG" -n "$VM" --query identity.principalId)
-  got=$(json role assignment list --all --query "sort([?principalId=='$vm_pid'].join('@', [roleDefinitionName, scope]))" | jq -r 'join(" ")' | lower)
-  expect "the VM's identity holds exactly: create-only on $CONTAINER, Secrets User on $KV" "$got" \
+  # Only this app's resource group: the VM also holds the roles of the other apps on it.
+  got=$(json role assignment list --all --query "sort([?principalId=='$vm_pid' && contains(scope, '/resourceGroups/$APP_RG/')].join('@', [roleDefinitionName, scope]))" | jq -r 'join(" ")' | lower)
+  expect "in $APP_RG the VM's identity holds exactly: create-only on $CONTAINER, Secrets User on $KV" "$got" \
     "$(echo "$BACKUP_ROLE@$CONTAINER_ID Key Vault Secrets User@$KV_ID" | lower)"
   deploy_pid=$(v identity show -g "$APP_RG" -n "$DEPLOY_ID" --query principalId)
   got=$(json role assignment list --all --query "[?principalId=='$deploy_pid'].join('@', [roleDefinitionName, scope])" | jq -r 'join(" ")' | lower)
