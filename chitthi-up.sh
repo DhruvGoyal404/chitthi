@@ -30,9 +30,10 @@ for a in "$@"; do
 done
 
 preflight require-enabled
-if [[ -z $app_only ]]; then bash deploy/azure/host-up.sh "app=$APP"; else set_app_state "$APP" up; fi
+[[ -n $app_only ]] || bash deploy/azure/host-up.sh "app=$APP"
 ip=$(host_ip)
 [[ -n $ip ]] || die "$PIP has no address: run without --app-only"
+set_app_state "$APP" up # only now: a stale "up" would stop the other app's down script taking the host
 
 step "DNS: $DOMAIN -> $ip"
 cf_set_a "$ZONE" "$DOMAIN" "$ip" chitthi-cloudflare-dns-token

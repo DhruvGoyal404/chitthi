@@ -412,6 +412,80 @@ class AppStates(unittest.TestCase):
         self.assertEqual(self.apps_up({"app-hisaab": "hosted"}), ["hisaab"])  # written before these states existed
 
 
+# A stand-in az for whole scripts: signed in, one subscription holding the host, the VM running
+# and no public IPv4. Every call goes to $FAKE/log.
+FAKE_AZ = r"""#!/usr/bin/env bash
+echo "az $*" >> "$FAKE/log"
+case "$1 $2" in
+  'account show') [[ $* == *--query* ]] && echo 'Fake sub'; exit 0 ;;
+  'account list') echo sub1; exit 0 ;;
+  'account set') exit 0 ;;
+  'group exists') echo true; exit 0 ;;
+esac
+case "$*" in
+  *'/subscriptions/sub1?api-version=2022-12-01'*) echo '{"state":"Enabled"}' ;;
+  *tags/default*) echo '{}' ;;
+  *publicIPAddresses*) echo 'ERROR: (NotFound) no such address' >&2; exit 1 ;;
+  *) echo "the fake has no answer for: $*" >&2; exit 1 ;;
+esac
+"""
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("bash") and shutil.which("jq"), "needs a POSIX bash and jq")
+class UpScript(unittest.TestCase):
+    def tools(self, leave_out=None):
+        """A folder for PATH: links to every program on the real one, the fake az, less leave_out."""
+        path = tempfile.mkdtemp(dir=self.tmp)
+        for d in os.environ["PATH"].split(os.pathsep):
+            if os.path.isdir(d):
+                for name in os.listdir(d):
+                    target, link = os.path.join(d, name), os.path.join(path, name)
+                    if name != leave_out and os.access(target, os.X_OK) and not os.path.lexists(link):
+                        os.symlink(target, link)
+        az = os.path.join(path, "az")
+        if os.path.lexists(az):
+            os.remove(az)
+        if leave_out != "az":
+            with open(az, "w", newline="\n") as f:
+                f.write(FAKE_AZ)
+            os.chmod(az, 0o755)
+        return path
+
+    def up(self, path, *args):
+        """Runs chitthi-up.sh; returns its result and the az calls it made."""
+        log = os.path.join(self.tmp, "log")
+        if os.path.exists(log):
+            os.remove(log)
+        env = {**os.environ, "PATH": path, "FAKE": self.tmp, "ARM_RETRY_SECONDS": "0"}
+        env.pop("PREFLIGHT_SUB", None)
+        r = subprocess.run([shutil.which("bash"), os.path.join(HERE, "..", "..", "chitthi-up.sh"), *args],
+                           capture_output=True, text=True, env=env, timeout=60)
+        if not os.path.exists(log):
+            return r, ""
+        with open(log, encoding="utf-8") as f:
+            return r, f.read()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_preflight_stops_when_a_tool_is_missing(self):
+        for tool in ("az", "jq", "curl"):
+            with self.subTest(tool=tool):
+                r, calls = self.up(self.tools(leave_out=tool))
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(f"'{tool}' is not installed", r.stderr)
+                self.assertEqual(calls, "")
+
+    def test_app_only_on_a_host_without_an_address_leaves_the_tag_alone(self):
+        # A stale "up" would make the other app's down script leave the VM running.
+        r, calls = self.up(self.tools(), "--app-only")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("has no address", r.stderr)
+        self.assertIn("publicIPAddresses", calls)  # it got as far as looking
+        self.assertNotIn("tags/default", calls)
+
+
 @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "needs bash and jq")
 class ArmRetry(unittest.TestCase):
     def run_arm(self, failures, message):
