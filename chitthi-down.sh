@@ -47,6 +47,7 @@ step "DNS: park $DOMAIN"
 cf_set_a "$ZONE" "$DOMAIN" "$PARKED_IP" chitthi-cloudflare-dns-token
 
 if [[ -n $app_only ]]; then
+  set_app_state "$APP" down
   log ""
   log "$APP's own steps are done; the host is still up (--app-only)"
   exit 0

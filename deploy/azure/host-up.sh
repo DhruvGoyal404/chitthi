@@ -4,7 +4,7 @@
 #
 #   bash deploy/azure/host-up.sh app=chitthi
 #
-# 1. Tags the VM app-<name>, so host-down.sh knows this app lives there.
+# 1. Tags the VM app-<name>=up, so host-down.sh knows this app is live there.
 # 2. A new static IPv4 (a new address every time), attached to the VM's NIC.
 # 3. The VM: started, through ARM.
 # 4. The alerts host-down.sh turned off: on.
@@ -25,8 +25,7 @@ done
 preflight require-enabled
 vm=$(arm_maybe "$VM_ID?\$expand=instanceView&api-version=$API_VM")
 [[ -n $vm ]] || die "there is no VM $VM in $HOST_RG (setup.sh infra builds it)"
-arm patch "$VM_ID/providers/Microsoft.Resources/tags/default?api-version=$API_RES" \
-  "$(jq -cn --arg t "app-$app" '{operation: "Merge", properties: {tags: {($t): "hosted"}}}')" >/dev/null
+set_app_state "$app" up
 
 step "1/3 Static IPv4 $PIP"
 if [[ -z $(arm_maybe "$PIP_ID?api-version=$API_NET") ]]; then

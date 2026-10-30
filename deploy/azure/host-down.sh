@@ -12,9 +12,10 @@
 # 4. An audit of the whole subscription: exits non-zero, with STILL BILLING, if anything bills
 #    beyond the expected ~₹0.
 #
-# The VM is shared. Each app on it carries a tag app-<name> (host-up.sh adds the caller's), and
-# this refuses while another app's tag is there unless also= names it: run that app's down steps
-# first (<other>-down.sh --app-only), so its backup and monitors aren't skipped silently.
+# The VM is shared. Each app on it carries a tag app-<name>=up|down (lib.sh, set_app_state), and
+# this refuses while another app is up unless also= names it: run that app's down steps first
+# (<other>-down.sh --app-only, which marks it down), so its backup and monitors aren't skipped
+# silently. Every app this takes down is marked down.
 # Re-runnable: every step checks first.
 # shellcheck source=deploy/azure/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -36,7 +37,7 @@ app=${arg[app]:-}
 
 vm=$(arm_maybe "$VM_ID?\$expand=instanceView&api-version=$API_VM")
 [[ -n $vm ]] || die "there is no VM $VM in $HOST_RG"
-for other in $(jq -r --arg me "app-$app" '.tags // {} | keys[] | select(startswith("app-") and . != $me) | ltrimstr("app-")' <<<"$vm"); do
+for other in $(apps_up "$vm" "$app"); do
   [[ ",${arg[also]:-}," == *",$other,"* ]] \
     || die "$VM also hosts $other, and this would take it down too. Run its own steps first ($other-down.sh --app-only), then: host-down.sh app=$app also=$other"
 done
@@ -74,5 +75,8 @@ if [[ -n $(arm_maybe "$PIP_ID?api-version=$API_NET") ]]; then
 else
   log "already deleted"
 fi
+
+also=${arg[also]:-}
+for a in "$app" ${also//,/ }; do set_app_state "$a" down; done
 
 audit "4/4 "
