@@ -30,7 +30,7 @@ for a in "$@"; do
 done
 
 preflight require-enabled
-if [[ -z $app_only ]]; then bash deploy/azure/host-up.sh "app=$APP"; fi
+if [[ -z $app_only ]]; then bash deploy/azure/host-up.sh "app=$APP"; else set_app_state "$APP" up; fi
 ip=$(host_ip)
 [[ -n $ip ]] || die "$PIP has no address: run without --app-only"
 

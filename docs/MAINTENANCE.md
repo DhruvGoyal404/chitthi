@@ -428,8 +428,8 @@ Bring the site up, then re-run the deploy (Actions → Deploy → Re-run, or Run
 down would recreate the IPv4 and turn the alerts back on.
 
 **Two apps on one VM.** The VM is shared, so taking it down takes every app on it down.
-- Each app's up script tags the VM `app-<name>`. `host-down.sh` refuses while another app's tag is there, unless `also=<name>` says you mean it.
-- With Hisaab there: run `bash hisaab-down.sh --app-only` (its backup, monitors and DNS), then `bash chitthi-down.sh`, which asks you to re-run `host-down.sh app=chitthi also=hisaab`.
+- Each app has a VM tag `app-<name>`: `up` or `down` (the older `hosted` reads as up). Its up script sets `up`; `--app-only` on its down script, or `host-down.sh`, sets `down`. `host-down.sh` refuses while another app is up, unless `also=<name>` says you mean it.
+- With Hisaab up: run `bash hisaab-down.sh --app-only` (its backup, monitors and DNS), then `bash chitthi-down.sh`.
 - Coming back: `bash chitthi-up.sh`, then `bash hisaab-up.sh --app-only`. Hisaab's DNS must follow the new address too.
 - Hisaab's scripts are its own thin wrappers over `deploy/azure/lib.sh`, `host-up.sh` and `host-down.sh`, copied into its repo: `hc_set`, `uptimerobot_set` and `cf_set_a` take the check prefix, the domain and the secret names as arguments.
 

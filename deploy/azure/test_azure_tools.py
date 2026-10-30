@@ -399,6 +399,20 @@ class Audit(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "needs bash and jq")
+class AppStates(unittest.TestCase):
+    def apps_up(self, tags, me="chitthi"):
+        lib = os.path.join(HERE, "lib.sh").replace("\\", "/")
+        r = subprocess.run([shutil.which("bash"), "-c", f'source "{lib}"; apps_up "$1" "$2"', "x", json.dumps({"tags": tags}), me],
+                           capture_output=True, text=True, check=True)
+        return r.stdout.split()
+
+    def test_only_a_tag_saying_down_lets_the_host_go(self):
+        self.assertEqual(self.apps_up({"app-hisaab": "down", "app-chitthi": "up", "owner": "me"}), [])
+        self.assertEqual(self.apps_up({"app-hisaab": "up", "app-chitthi": "up"}), ["hisaab"])
+        self.assertEqual(self.apps_up({"app-hisaab": "hosted"}), ["hisaab"])  # written before these states existed
+
+
+@unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "needs bash and jq")
 class ArmRetry(unittest.TestCase):
     def run_arm(self, failures, message):
         with tempfile.TemporaryDirectory() as tmp:

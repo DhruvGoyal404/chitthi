@@ -152,6 +152,17 @@ set_host_alerts() { # true|false
   done
 }
 
+# Each app on the VM has a tag app-<name>: up or down. Down means its own down steps ran (backup,
+# monitors, DNS), so the VM can go without it. Any other value, like the older "hosted", means up.
+set_app_state() { # <app> <up|down>
+  arm patch "$VM_ID/providers/Microsoft.Resources/tags/default?api-version=$API_RES" \
+    "$(jq -cn --arg t "app-$1" --arg v "$2" '{operation: "Merge", properties: {tags: {($t): $v}}}')" >/dev/null
+}
+apps_up() { # <VM JSON> <app to leave out>: the other apps that are up, one per line
+  jq -r --arg me "app-$2" '.tags // {} | to_entries[]
+    | select((.key | startswith("app-")) and .key != $me and .value != "down") | .key | ltrimstr("app-")' <<<"$1"
+}
+
 host_ip() { arm_maybe "$PIP_ID?api-version=$API_NET" | jq -r '.properties.ipAddress // empty'; }
 
 # Every resource in the subscription, priced while the host is down (audit.jq). Prints a table and
