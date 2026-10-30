@@ -414,7 +414,7 @@ class AppStates(unittest.TestCase):
 
 # A stand-in az for whole scripts: signed in, one subscription holding the host, the VM running
 # and no public IPv4. Every call goes to $FAKE/log.
-FAKE_AZ = r"""#!/usr/bin/env bash
+UP_FAKE_AZ = r"""#!/usr/bin/env bash
 echo "az $*" >> "$FAKE/log"
 case "$1 $2" in
   'account show') [[ $* == *--query* ]] && echo 'Fake sub'; exit 0 ;;
@@ -447,7 +447,7 @@ class UpScript(unittest.TestCase):
             os.remove(az)
         if leave_out != "az":
             with open(az, "w", newline="\n") as f:
-                f.write(FAKE_AZ)
+                f.write(UP_FAKE_AZ)
             os.chmod(az, 0o755)
         return path
 
